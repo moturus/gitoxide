@@ -123,6 +123,7 @@ impl super::Store {
         'retry_with_changed_index: loop {
             let previous_state_id = index.state_id();
             'retry_with_next_slot_index: loop {
+                #[allow(deprecated, reason = "fetch_update is required by the crate's Rust 1.85 MSRV")]
                 match index
                     .next_index_to_load
                     .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {

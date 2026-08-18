@@ -367,7 +367,7 @@ impl crate::Bundle {
     }
 }
 
-fn resolve_entry(range: data::EntryRange, mapped_file: &memmap2::Mmap) -> Option<&[u8]> {
+fn resolve_entry(range: data::EntryRange, mapped_file: &crate::MMap) -> Option<&[u8]> {
     mapped_file.get(range.start as usize..range.end as usize)
 }
 
@@ -375,8 +375,8 @@ fn resolve_entry(range: data::EntryRange, mapped_file: &memmap2::Mmap) -> Option
 fn new_pack_file_resolver(
     data_file: SharedTempFile,
 ) -> io::Result<(
-    impl Fn(data::EntryRange, &memmap2::Mmap) -> Option<&[u8]> + Send + Clone,
-    memmap2::Mmap,
+    impl Fn(data::EntryRange, &crate::MMap) -> Option<&[u8]> + Send + Clone,
+    crate::MMap,
 )> {
     let mut guard = data_file.lock();
     guard.flush()?;

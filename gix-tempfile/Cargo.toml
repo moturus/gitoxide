@@ -34,7 +34,6 @@ test = true
 gix-fs = { version = "^0.22.0", path = "../gix-fs" }
 parking_lot = "0.12.4"
 dashmap = { version = "6.2.1", optional = true }
-tempfile = "3.26.0"
 
 signal-hook = { version = "0.4.3", default-features = false, optional = true }
 signal-hook-registry = { version = "1.4.8", optional = true }
@@ -51,6 +50,12 @@ hp-hashmap = ["dep:dashmap"]
 
 [target.'cfg(not(windows))'.dependencies]
 libc = { version = "0.2.186", default-features = false }
+
+[target.'cfg(not(target_os = "motor"))'.dependencies]
+tempfile = "3.26.0"
+
+[target.'cfg(target_os = "motor")'.dependencies]
+gix-motor-tempfile = { path = "../gix-motor-tempfile" }
 
 [package.metadata.docs.rs]
 all-features = true

@@ -2134,6 +2134,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "gix-motor-tempfile"
+version = "0.1.0"
+
+[[package]]
 name = "gix-negotiate"
 version = "0.34.0"
 dependencies = [
@@ -2191,6 +2195,7 @@ dependencies = [
  "gix-fs",
  "gix-hash",
  "gix-hashtable",
+ "gix-motor-tempfile",
  "gix-object",
  "gix-odb",
  "gix-pack",
@@ -2504,6 +2509,7 @@ dependencies = [
  "dashmap",
  "document-features",
  "gix-fs",
+ "gix-motor-tempfile",
  "libc",
  "parking_lot",
  "signal-hook 0.4.4",

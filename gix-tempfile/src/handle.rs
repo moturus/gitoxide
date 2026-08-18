@@ -2,6 +2,8 @@
 #![allow(clippy::empty_docs)]
 use std::{io, path::Path};
 
+#[cfg(target_os = "motor")]
+use gix_motor_tempfile as tempfile;
 use tempfile::{NamedTempFile, TempPath};
 
 use crate::{AutoRemove, ContainingDirectory, ForksafeTempfile, Handle, NEXT_MAP_INDEX, REGISTRY};

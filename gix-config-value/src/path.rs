@@ -50,11 +50,19 @@ pub mod interpolate {
     /// Obtain the home directory for the given user `name` or return `None` if the user wasn't found
     /// or any other error occurred.
     /// It can be used as `home_for_user` parameter in [`Path::interpolate()`][crate::Path::interpolate()].
-    #[cfg_attr(windows, allow(unused_variables))]
-    #[cfg_attr(all(target_family = "wasm", not(target_os = "emscripten")), allow(unused_variables))]
+    #[cfg_attr(
+        any(
+            target_os = "android",
+            target_os = "motor",
+            target_os = "windows",
+            all(target_family = "wasm", not(target_os = "emscripten"))
+        ),
+        allow(unused_variables)
+    )]
     pub fn home_for_user(name: &str) -> Option<PathBuf> {
         #[cfg(not(any(
             target_os = "android",
+            target_os = "motor",
             target_os = "windows",
             all(target_family = "wasm", not(target_os = "emscripten"))
         )))]
@@ -77,6 +85,7 @@ pub mod interpolate {
         }
         #[cfg(any(
             target_os = "android",
+            target_os = "motor",
             target_os = "windows",
             all(target_family = "wasm", not(target_os = "emscripten"))
         ))]
@@ -203,12 +212,12 @@ impl Path {
         }
     }
 
-    #[cfg(any(target_os = "windows", target_os = "android"))]
+    #[cfg(any(target_os = "windows", target_os = "android", target_os = "motor"))]
     fn interpolate_user(self, _home_for_user: fn(&str) -> Option<PathBuf>) -> Result<PathBuf, interpolate::Error> {
         Err(interpolate::Error::UserInterpolationUnsupported)
     }
 
-    #[cfg(not(any(target_os = "windows", target_os = "android")))]
+    #[cfg(not(any(target_os = "windows", target_os = "android", target_os = "motor")))]
     fn interpolate_user(self, home_for_user: fn(&str) -> Option<PathBuf>) -> Result<PathBuf, interpolate::Error> {
         let (_prefix, val) = self.split_at("/".len());
         let i = val

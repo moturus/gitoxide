@@ -88,6 +88,7 @@
 //!
 //! What follows is a list of methods you might be missing, along with workarounds if available.
 //! * [`git2::Repository::open_bare()`](https://docs.rs/git2/*/git2/struct.Repository.html#method.open_bare) ➡ ❌ - use [`open()`] and discard if it is not bare.
+
 //! * [`git2::build::CheckoutBuilder::disable_filters()`](https://docs.rs/git2/*/git2/build/struct.CheckoutBuilder.html#method.disable_filters) ➡ ❌ *(filters are always applied during checkouts)*
 //! * [`git2::Repository::submodule_status()`](https://docs.rs/git2/*/git2/struct.Repository.html#method.submodule_status) ➡ [`Submodule::state()`] - status provides more information and conveniences though, and an actual worktree status isn't performed.
 //!
@@ -104,6 +105,21 @@
 #![cfg_attr(all(doc, feature = "document-features"), feature(doc_cfg))]
 #![deny(missing_docs, unsafe_code)]
 #![allow(clippy::result_large_err)]
+
+// LLVM may lower optimized byte scans in pure Rust dependencies to `strlen`,
+// which Motor's Rust target does not otherwise provide. Volatile reads keep
+// the implementation itself from being folded back into a `strlen` call.
+#[allow(unsafe_code)]
+#[cfg(target_os = "motor")]
+#[unsafe(export_name = "strlen")]
+unsafe extern "C" fn motor_strlen(mut value: *const i8) -> usize {
+    let mut length = 0;
+    while unsafe { std::ptr::read_volatile(value) } != 0 {
+        value = unsafe { value.add(1) };
+        length += 1;
+    }
+    length
+}
 
 // Re-exports to make this a potential one-stop shop crate avoiding people from having to reference various crates themselves.
 // This also means that their major version changes affect our major version, but that's alright as we directly expose their

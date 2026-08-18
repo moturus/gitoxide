@@ -194,7 +194,6 @@ blocking-network-client = [
     "gix-protocol/blocking-client",
     "gix-pack/streaming-input",
     "dep:gix-transport",
-    "attributes",
     "credentials",
 ]
 ## Stacks with `blocking-network-client` to provide support for HTTP/S using **curl**, and implies blocking networking as a whole, making the `https://` transport available.

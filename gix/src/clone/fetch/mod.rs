@@ -84,6 +84,30 @@ pub enum Error {
     TransferInMemoryConfig(#[from] gix_config::file::init::Error),
 }
 
+#[cfg(feature = "blocking-network-client")]
+impl PrepareFetch {
+    fn connect_with_transport_factory<'remote, 'repo>(
+        &mut self,
+        remote: &'remote crate::Remote<'repo>,
+        direction: crate::remote::Direction,
+    ) -> Result<
+        crate::remote::Connection<
+            'remote,
+            'static,
+            'repo,
+            Box<dyn gix_transport::client::blocking_io::Transport + Send>,
+        >,
+        Error,
+    > {
+        let Some(factory) = self.transport_factory.as_mut() else {
+            return remote.connect(direction).map_err(Into::into);
+        };
+        let (url, version) = remote.sanitized_url_and_version(direction)?;
+        let transport = factory(url, version).map_err(Error::RemoteConnection)?;
+        Ok(remote.to_connection_with_transport(transport))
+    }
+}
+
 /// Modification
 impl PrepareFetch {
     /// Fetch a pack and update local branches according to refspecs, providing `progress` and checking `should_interrupt` to stop
@@ -147,8 +171,11 @@ impl PrepareFetch {
 
         let target_ref = if use_single_branch_for_shallow {
             // Determine target branch from user-specified ref_name or default branch
-            if let Some(ref_name) = &self.ref_name {
+            if let Some(ref_name) = self.ref_name.clone() {
                 let prev_tags = std::mem::replace(&mut remote.fetch_tags, remote::fetch::Tags::None);
+                #[cfg(feature = "blocking-network-client")]
+                let mut connection = self.connect_with_transport_factory(&remote, remote::Direction::Fetch)?;
+                #[cfg(all(feature = "async-network-client", not(feature = "blocking-network-client")))]
                 let mut connection = remote.connect(remote::Direction::Fetch).await?;
                 if let Some(f) = self.configure_connection.as_mut() {
                     f(&mut connection).map_err(Error::RemoteConnection)?;
@@ -166,13 +193,16 @@ impl PrepareFetch {
                         },
                     )
                     .await?;
-                let (_target, full_ref_name) = util::find_custom_refname(&refmap, ref_name)?;
+                let (_target, full_ref_name) = util::find_custom_refname(&refmap, &ref_name)?;
                 remote.fetch_tags = prev_tags;
                 Some(full_ref_name.try_into()?)
             } else {
                 // For shallow clones without a specified ref, we need to determine the ref to clone.
                 // Just fetch HEAD for that.
                 let prev_tags = std::mem::replace(&mut remote.fetch_tags, remote::fetch::Tags::None);
+                #[cfg(feature = "blocking-network-client")]
+                let mut connection = self.connect_with_transport_factory(&remote, remote::Direction::Fetch)?;
+                #[cfg(all(feature = "async-network-client", not(feature = "blocking-network-client")))]
                 let mut connection = remote.connect(remote::Direction::Fetch).await?;
                 if let Some(f) = self.configure_connection.as_mut() {
                     f(&mut connection).map_err(Error::RemoteConnection)?;
@@ -290,6 +320,9 @@ impl PrepareFetch {
         .to_owned();
         let pending_pack = {
             // For shallow clones, we already connected once, so we need to connect again
+            #[cfg(feature = "blocking-network-client")]
+            let mut connection = self.connect_with_transport_factory(&remote, remote::Direction::Fetch)?;
+            #[cfg(all(feature = "async-network-client", not(feature = "blocking-network-client")))]
             let mut connection = remote.connect(remote::Direction::Fetch).await?;
             if let Some(f) = self.configure_connection.as_mut() {
                 f(&mut connection).map_err(Error::RemoteConnection)?;
@@ -337,6 +370,9 @@ impl PrepareFetch {
                     // On the very special occasion that we fail as there is a remote `refs/heads/HEAD` reference that clashes
                     // with our implicit refspec, retry without it. Maybe this tells us that we shouldn't have that implicit
                     // refspec, as git can do this without connecting twice.
+                    #[cfg(feature = "blocking-network-client")]
+                    let connection = self.connect_with_transport_factory(&remote, remote::Direction::Fetch)?;
+                    #[cfg(all(feature = "async-network-client", not(feature = "blocking-network-client")))]
                     let connection = remote.connect(remote::Direction::Fetch).await?;
                     let connection = connection.into_detached();
                     fetch_opts.extra_refspecs.remove(head_refspec_idx);

@@ -281,6 +281,7 @@ members = [
     "gix-pack",
     "gix-odb",
     "gix-tempfile",
+    "gix-motor-tempfile",
     "gix-lock",
     "gix-attributes",
     "gix-ignore",

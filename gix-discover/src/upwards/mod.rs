@@ -83,6 +83,7 @@ pub(crate) mod function {
             self.physical_parent_steps.is_some()
         }
 
+        #[cfg_attr(target_os = "motor", allow(dead_code))]
         pub fn metadata(&mut self) -> Result<&std::fs::Metadata, Error> {
             if self.current_metadata.is_none() {
                 let path = if self.current.as_os_str().is_empty() {

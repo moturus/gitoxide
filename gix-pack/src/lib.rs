@@ -21,7 +21,11 @@
 use std::{borrow::Cow, ops::Deref, path::Path};
 
 /// The default memory-backed storage for pack data and index files.
+#[cfg(not(target_os = "motor"))]
 pub use memmap2::Mmap as MMap;
+/// The default memory-backed storage for pack data and index files.
+#[cfg(target_os = "motor")]
+pub type MMap = Vec<u8>;
 
 /// A byte-oriented backing store for pack data and indices.
 pub trait FileData: Deref<Target = [u8]> {}
@@ -57,15 +61,22 @@ pub mod multi_index;
 ///
 pub mod verify;
 
-mod mmap {
+pub(crate) mod mmap {
     use std::path::Path;
 
-    pub fn read_only(path: &Path) -> std::io::Result<memmap2::Mmap> {
-        let file = std::fs::File::open(path)?;
-        // SAFETY: we have to take the risk of somebody changing the file underneath. Git never writes into the same file.
-        #[expect(unsafe_code)]
-        unsafe {
-            memmap2::MmapOptions::new().map_copy_read_only(&file)
+    pub fn read_only(path: &Path) -> std::io::Result<crate::MMap> {
+        #[cfg(target_os = "motor")]
+        {
+            std::fs::read(path)
+        }
+        #[cfg(not(target_os = "motor"))]
+        {
+            let file = std::fs::File::open(path)?;
+            // SAFETY: we have to take the risk of somebody changing the file underneath. Git never writes into the same file.
+            #[expect(unsafe_code)]
+            unsafe {
+                memmap2::MmapOptions::new().map_copy_read_only(&file)
+            }
         }
     }
 }

@@ -1,5 +1,7 @@
 use std::path::Path;
 
+#[cfg(target_os = "motor")]
+use gix_motor_tempfile as tempfile;
 use tempfile::{NamedTempFile, TempPath};
 
 use crate::{AutoRemove, handle};

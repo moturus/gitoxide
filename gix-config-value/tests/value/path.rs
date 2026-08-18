@@ -79,7 +79,7 @@ mod interpolate {
         Ok(())
     }
 
-    #[cfg(any(target_os = "windows", target_os = "android"))]
+    #[cfg(any(target_os = "windows", target_os = "android", target_os = "motor"))]
     #[test]
     fn tilde_with_given_user_is_unsupported_on_windows_and_android() {
         assert!(matches!(
@@ -88,7 +88,7 @@ mod interpolate {
         ));
     }
 
-    #[cfg(not(any(target_os = "windows", target_os = "android")))]
+    #[cfg(not(any(target_os = "windows", target_os = "android", target_os = "motor")))]
     #[test]
     fn tilde_with_given_user() -> crate::Result {
         let home = std::env::current_dir()?;

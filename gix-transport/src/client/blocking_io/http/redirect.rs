@@ -9,6 +9,7 @@ pub struct Error {
 }
 
 #[derive(Default, Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg(any(feature = "http-client-curl", feature = "http-client-reqwest", test))]
 pub(crate) enum Action {
     Follow,
     RejectConfiguredHeaders,
@@ -16,6 +17,7 @@ pub(crate) enum Action {
     Stop,
 }
 
+#[cfg(any(feature = "http-client-curl", feature = "http-client-reqwest", test))]
 impl Action {
     pub(crate) fn from_request(may_follow_redirects: bool, has_configured_request_headers: bool) -> Self {
         match (may_follow_redirects, has_configured_request_headers) {
@@ -32,6 +34,7 @@ fn parse_two_urls(a: &str, b: &str) -> Option<(gix_url::Url, gix_url::Url)> {
     Some((a, b))
 }
 
+#[cfg(any(feature = "http-client-curl", feature = "http-client-reqwest", test))]
 pub(crate) fn scheme_is_safe(redirect_url: &str, original_url: &str) -> bool {
     let Some((redirect_url, original_url)) = parse_two_urls(redirect_url, original_url) else {
         return false;
@@ -70,6 +73,7 @@ pub(crate) fn can_reuse_identity(redirect_url: &str, original_url: &str) -> bool
     false
 }
 
+#[cfg(any(feature = "http-client-curl", feature = "http-client-reqwest", test))]
 pub(crate) fn base_url(redirect_url: &str, base_url: &str, url: String) -> Result<String, Error> {
     let tail = url
         .strip_prefix(base_url)
@@ -89,6 +93,7 @@ pub(crate) fn base_url(redirect_url: &str, base_url: &str, url: String) -> Resul
         .map(ToOwned::to_owned)
 }
 
+#[cfg(any(feature = "http-client-curl", feature = "http-client-reqwest", test))]
 pub(crate) fn swap_tails(effective_base_url: Option<&str>, base_url: &str, mut url: String) -> String {
     match effective_base_url {
         Some(effective_base) => {

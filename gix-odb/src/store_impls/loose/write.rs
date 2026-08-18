@@ -1,5 +1,7 @@
 use std::{fs, io, io::Write, path::PathBuf};
 
+#[cfg(target_os = "motor")]
+use gix_motor_tempfile as tempfile;
 use gix_object::WriteTo;
 use gix_zlib::stream::deflate;
 use tempfile::NamedTempFile;

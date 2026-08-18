@@ -14,6 +14,13 @@ type ConfigureConnectionFn = Box<
         &mut remote::Connection<'_, '_, '_, Box<dyn Transport + Send>>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>,
 >;
+#[cfg(feature = "blocking-network-client")]
+type TransportFactoryFn = Box<
+    dyn FnMut(
+        gix_url::Url,
+        gix_protocol::transport::Protocol,
+    ) -> Result<Box<dyn Transport + Send>, Box<dyn std::error::Error + Send + Sync>>,
+>;
 
 /// A utility to collect configuration on how to fetch from a remote and initiate a fetch operation. It will delete the newly
 /// created repository on when dropped without successfully finishing a fetch.
@@ -30,6 +37,9 @@ pub struct PrepareFetch {
     /// A function to configure a connection before using it.
     #[cfg(any(feature = "async-network-client", feature = "blocking-network-client"))]
     configure_connection: Option<ConfigureConnectionFn>,
+    /// A caller-provided blocking transport factory.
+    #[cfg(feature = "blocking-network-client")]
+    transport_factory: Option<TransportFactoryFn>,
     /// Options for preparing a fetch operation.
     #[cfg(any(feature = "async-network-client", feature = "blocking-network-client"))]
     fetch_options: remote::ref_map::Options,
@@ -173,6 +183,8 @@ impl PrepareFetch {
             configure_remote: None,
             #[cfg(any(feature = "async-network-client", feature = "blocking-network-client"))]
             configure_connection: None,
+            #[cfg(feature = "blocking-network-client")]
+            transport_factory: None,
             shallow: remote::fetch::Shallow::NoChange,
             ref_name: None,
             revision: None,
@@ -217,6 +229,24 @@ mod access_feat {
 
     /// Builder
     impl PrepareFetch {
+        /// Use `factory` to create blocking transports instead of gix's built-in connector.
+        ///
+        /// The factory can preserve application-specific network and trust policy while gix
+        /// continues to own protocol negotiation and pack processing. It may be called more
+        /// than once when an operation needs to reconnect.
+        #[cfg(feature = "blocking-network-client")]
+        pub fn with_transport_factory(
+            mut self,
+            factory: impl FnMut(
+                gix_url::Url,
+                gix_protocol::transport::Protocol,
+            ) -> Result<Box<dyn Transport + Send>, Box<dyn std::error::Error + Send + Sync>>
+            + 'static,
+        ) -> Self {
+            self.transport_factory = Some(Box::new(factory));
+            self
+        }
+
         /// Set a callback to use for configuring the connection to use right before connecting to the remote.
         ///
         /// It is most commonly used for custom configuration.

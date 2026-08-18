@@ -37,13 +37,18 @@ gix-pack = { version = "^0.73.0", path = "../gix-pack", default-features = false
 gix-fs = { version = "^0.22.0", path = "../gix-fs" }
 serde = { version = "1.0.114", optional = true, default-features = false, features = ["derive"] }
 
-tempfile = "3.26.0"
 thiserror = "2.0.18"
 parking_lot = { version = "0.12.4" }
 arc-swap = "1.9.0"
 memmap2 = "0.9.11"
 
 document-features = { version = "0.2.0", optional = true }
+
+[target.'cfg(not(target_os = "motor"))'.dependencies]
+tempfile = "3.26.0"
+
+[target.'cfg(target_os = "motor")'.dependencies]
+gix-motor-tempfile = { path = "../gix-motor-tempfile" }
 
 [dev-dependencies]
 gix-odb = { path = ".", features = ["sha1", "sha256"] }
