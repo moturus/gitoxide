@@ -4,6 +4,16 @@ use crate::{
     clone::PrepareFetch,
 };
 
+/// Access
+impl PrepareFetch {
+    /// Return the repository being prepared for fetching.
+    ///
+    /// This is `Some` before [`fetch_only()`](Self::fetch_only) succeeds and `None` afterward.
+    pub fn repository_mut(&mut self) -> Option<&mut Repository> {
+        self.repo.as_mut()
+    }
+}
+
 /// Builder
 impl PrepareFetch {
     /// Use `f` to apply arbitrary changes to the remote that is about to be used to fetch a pack.

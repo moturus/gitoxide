@@ -297,9 +297,22 @@ mod blocking_io {
     #[test]
     fn from_shallow_allowed_by_default() -> crate::Result {
         let tmp = gix_testtools::tempfile::TempDir::new()?;
-        let (repo, _change) = gix::prepare_clone_bare(remote::repo("base.shallow").path(), tmp.path())?
-            .with_in_memory_config_overrides(Some("my.marker=1"))
-            .fetch_only(gix::progress::Discard, &AtomicBool::default())?;
+        let mut prepare = gix::prepare_clone_bare(remote::repo("base.shallow").path(), tmp.path())?
+            .with_in_memory_config_overrides(Some("my.marker=1"));
+        prepare
+            .repository_mut()
+            .expect("repository is present before fetching")
+            .objects
+            .ignore_replacements = true;
+        let (repo, _change) = prepare.fetch_only(gix::progress::Discard, &AtomicBool::default())?;
+        assert!(
+            prepare.repository_mut().is_none(),
+            "the repository is consumed by a successful fetch"
+        );
+        assert!(
+            repo.objects.ignore_replacements,
+            "repository mutation is retained by the fetched repository"
+        );
         assert_eq!(
             shallow_ids(&repo, "present")?,
             sorted([
