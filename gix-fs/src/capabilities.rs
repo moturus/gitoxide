@@ -39,6 +39,18 @@ impl Default for Capabilities {
     }
 }
 
+#[cfg(target_os = "motor")]
+impl Default for Capabilities {
+    fn default() -> Self {
+        Capabilities {
+            precompose_unicode: false,
+            ignore_case: false,
+            executable_bit: true,
+            symlink: false,
+        }
+    }
+}
+
 enum Dir {
     IsGit,
     IsArbitrary,
@@ -106,7 +118,33 @@ impl Capabilities {
         res
     }
 
-    #[cfg(not(unix))]
+    #[cfg(target_os = "motor")]
+    fn probe_file_mode(root: &Path) -> std::io::Result<bool> {
+        use std::os::fd::AsRawFd;
+
+        let rand = gix_utils::rng::usize(..);
+        let test_path = root.join(format!("_test_executable_bit{rand}"));
+        let file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&test_path)?;
+        let fd = file.as_raw_fd();
+        let read_write = moto_rt::fs::PERM_READ | moto_rt::fs::PERM_WRITE;
+        let res = (|| {
+            moto_rt::fs::set_file_perm(fd, read_write | moto_rt::fs::PERM_EXEC).map_err(motor_io_error)?;
+            let set_works = moto_rt::fs::get_file_attr(fd).map_err(motor_io_error)?.perm & moto_rt::fs::PERM_EXEC != 0;
+
+            moto_rt::fs::set_file_perm(fd, read_write).map_err(motor_io_error)?;
+            let clear_works =
+                moto_rt::fs::get_file_attr(fd).map_err(motor_io_error)?.perm & moto_rt::fs::PERM_EXEC == 0;
+            Ok(set_works && clear_works)
+        })();
+        drop(file);
+        std::fs::remove_file(test_path)?;
+        res
+    }
+
+    #[cfg(not(any(unix, target_os = "motor")))]
     fn probe_file_mode(_root: &Path) -> std::io::Result<bool> {
         Ok(false)
     }
@@ -203,7 +241,7 @@ impl Default for Capabilities {
     }
 }
 
-#[cfg(not(any(windows, unix, target_os = "wasi")))]
+#[cfg(not(any(windows, unix, target_os = "wasi", target_os = "motor")))]
 impl Default for Capabilities {
     fn default() -> Self {
         Capabilities {
@@ -213,4 +251,10 @@ impl Default for Capabilities {
             symlink: false,
         }
     }
+}
+
+#[cfg(target_os = "motor")]
+fn motor_io_error(error: moto_rt::Error) -> std::io::Error {
+    let error_code: moto_rt::ErrorCode = error.into();
+    std::io::Error::from_raw_os_error(error_code.into())
 }

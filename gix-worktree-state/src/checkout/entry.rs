@@ -282,8 +282,11 @@ pub(crate) fn open_file(
     fs_supports_executable_bit: bool,
     entry_mode: gix_index::entry::Mode,
 ) -> std::io::Result<(std::fs::File, ExecutableBitChange)> {
-    #[cfg_attr(windows, allow(unused_mut))]
+    #[cfg(unix)]
     let mut options = open_options(destination_is_initially_empty, overwrite_existing);
+    #[cfg(not(unix))]
+    let options = open_options(destination_is_initially_empty, overwrite_existing);
+    #[cfg(any(unix, target_os = "motor"))]
     let needs_executable_bit = fs_supports_executable_bit && entry_mode == gix_index::entry::Mode::FILE_EXECUTABLE;
     #[cfg(unix)]
     let executable_bit_change = if needs_executable_bit && destination_is_initially_empty {
@@ -299,8 +302,16 @@ pub(crate) fn open_file(
     } else {
         ExecutableBitChange::Remove
     };
-    //  not supported on windows
-    #[cfg(windows)]
+    #[cfg(target_os = "motor")]
+    let executable_bit_change = if !fs_supports_executable_bit {
+        ExecutableBitChange::NoChange
+    } else if needs_executable_bit {
+        ExecutableBitChange::Set
+    } else {
+        ExecutableBitChange::Remove
+    };
+    // Executable permissions are not supported on other non-Unix targets.
+    #[cfg(not(any(unix, target_os = "motor")))]
     let executable_bit_change = ExecutableBitChange::NoChange;
     try_op_or_unlink(path, overwrite_existing, |p| options.open(p)).map(|f| (f, executable_bit_change))
 }
@@ -312,10 +323,11 @@ pub(crate) fn finalize_entry(
     entry: &mut gix_index::Entry,
     file: std::fs::File,
     desired_bytes: u64,
-    #[cfg_attr(windows, allow(unused_variables))] executable_bit_change: ExecutableBitChange,
+    #[cfg_attr(not(any(unix, target_os = "motor")), allow(unused_variables))]
+    executable_bit_change: ExecutableBitChange,
 ) -> Result<(), crate::checkout::Error> {
     // For possibly existing, overwritten files, we must change the file mode explicitly to match the index.
-    #[cfg(unix)]
+    #[cfg(any(unix, target_os = "motor"))]
     match executable_bit_change {
         ExecutableBitChange::NoChange => {}
         ExecutableBitChange::Set => adjust_executable_bits(&file, true)?,
@@ -335,6 +347,20 @@ pub(crate) fn finalize_entry(
     entry.stat = Stat::from_fs(md)?;
     file.close()?;
     Ok(())
+}
+
+#[cfg(target_os = "motor")]
+fn adjust_executable_bits(file: &std::fs::File, executable: bool) -> Result<(), std::io::Error> {
+    use std::os::fd::AsRawFd;
+
+    let mut permissions = moto_rt::fs::PERM_READ | moto_rt::fs::PERM_WRITE;
+    if executable {
+        permissions |= moto_rt::fs::PERM_EXEC;
+    }
+    moto_rt::fs::set_file_perm(file.as_raw_fd(), permissions).map_err(|error| {
+        let error_code: moto_rt::ErrorCode = error.into();
+        std::io::Error::from_raw_os_error(error_code.into())
+    })
 }
 
 /// Use `fstat` and, if needed, `fchmod` on a file descriptor to adjust whether a regular file is executable.

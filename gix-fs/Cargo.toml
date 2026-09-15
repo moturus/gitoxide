@@ -26,6 +26,9 @@ gix-utils = { version = "^0.3.5", path = "../gix-utils" }
 thiserror = "2.0.18"
 serde = { version = "1.0.114", optional = true, default-features = false, features = ["std", "derive"] }
 
+[target.'cfg(target_os = "motor")'.dependencies]
+moto-rt = "0.17.6"
+
 [dev-dependencies]
 crossbeam-channel = "0.5.15"
 is_ci = "1.1.1"

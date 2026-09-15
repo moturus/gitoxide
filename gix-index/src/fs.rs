@@ -10,7 +10,11 @@ use std::{path::Path, time::SystemTime};
 #[cfg(unix)]
 pub struct Metadata(rustix::fs::Stat);
 
-#[cfg(not(unix))]
+#[cfg(target_os = "motor")]
+/// A structure to partially mirror native filesystem metadata.
+pub struct Metadata(moto_rt::fs::FileAttr);
+
+#[cfg(not(any(unix, target_os = "motor")))]
 /// A structure to partially mirror [`std::fs::Metadata`].
 pub struct Metadata(std::fs::Metadata);
 
@@ -22,7 +26,14 @@ impl Metadata {
         {
             rustix::fs::lstat(path).map(Metadata).map_err(Into::into)
         }
-        #[cfg(not(unix))]
+        #[cfg(target_os = "motor")]
+        {
+            let path = path
+                .to_str()
+                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+            moto_rt::fs::stat(path).map(Metadata).map_err(motor_io_error)
+        }
+        #[cfg(not(any(unix, target_os = "motor")))]
         path.symlink_metadata().map(Metadata)
     }
 
@@ -32,7 +43,14 @@ impl Metadata {
         {
             rustix::fs::fstat(file).map(Metadata).map_err(Into::into)
         }
-        #[cfg(not(unix))]
+        #[cfg(target_os = "motor")]
+        {
+            use std::os::fd::AsRawFd;
+            moto_rt::fs::get_file_attr(file.as_raw_fd())
+                .map(Metadata)
+                .map_err(motor_io_error)
+        }
+        #[cfg(not(any(unix, target_os = "motor")))]
         file.metadata().map(Metadata)
     }
 }
@@ -49,7 +67,11 @@ impl Metadata {
         {
             (self.0.st_mode as u32 & libc::S_IFMT as u32) == libc::S_IFDIR as u32
         }
-        #[cfg(not(unix))]
+        #[cfg(target_os = "motor")]
+        {
+            self.0.file_type == moto_rt::fs::FILETYPE_DIRECTORY
+        }
+        #[cfg(not(any(unix, target_os = "motor")))]
         self.0.is_dir()
     }
 
@@ -73,7 +95,11 @@ impl Metadata {
             let seconds = seconds as i64;
             system_time_from_secs_nanos(seconds, nanoseconds.try_into().ok()?)
         }
-        #[cfg(not(unix))]
+        #[cfg(target_os = "motor")]
+        {
+            motor_system_time(self.0.modified)
+        }
+        #[cfg(not(any(unix, target_os = "motor")))]
         self.0.modified().ok()
     }
 
@@ -100,7 +126,11 @@ impl Metadata {
             let seconds = seconds as i64;
             system_time_from_secs_nanos(seconds, nanoseconds.try_into().ok()?)
         }
-        #[cfg(not(unix))]
+        #[cfg(target_os = "motor")]
+        {
+            motor_system_time(self.0.created)
+        }
+        #[cfg(not(any(unix, target_os = "motor")))]
         self.0.created().ok()
     }
 
@@ -110,7 +140,11 @@ impl Metadata {
         {
             self.0.st_size as u64
         }
-        #[cfg(not(unix))]
+        #[cfg(target_os = "motor")]
+        {
+            self.0.size
+        }
+        #[cfg(not(any(unix, target_os = "motor")))]
         self.0.len()
     }
 
@@ -161,7 +195,11 @@ impl Metadata {
             (self.0.st_mode as u32 & libc::S_IFMT as u32) == libc::S_IFREG as u32
                 && self.0.st_mode as u32 & libc::S_IXUSR as u32 == libc::S_IXUSR as u32
         }
-        #[cfg(not(unix))]
+        #[cfg(target_os = "motor")]
+        {
+            self.0.file_type == moto_rt::fs::FILETYPE_FILE && self.0.perm & moto_rt::fs::PERM_EXEC != 0
+        }
+        #[cfg(not(any(unix, target_os = "motor")))]
         gix_fs::is_executable(&self.0)
     }
 
@@ -171,7 +209,11 @@ impl Metadata {
         {
             (self.0.st_mode as u32 & libc::S_IFMT as u32) == libc::S_IFLNK as u32
         }
-        #[cfg(not(unix))]
+        #[cfg(target_os = "motor")]
+        {
+            false
+        }
+        #[cfg(not(any(unix, target_os = "motor")))]
         self.0.is_symlink()
     }
 
@@ -181,9 +223,29 @@ impl Metadata {
         {
             (self.0.st_mode as u32 & libc::S_IFMT as u32) == libc::S_IFREG as u32
         }
-        #[cfg(not(unix))]
+        #[cfg(target_os = "motor")]
+        {
+            self.0.file_type == moto_rt::fs::FILETYPE_FILE
+        }
+        #[cfg(not(any(unix, target_os = "motor")))]
         self.0.is_file()
     }
+}
+
+#[cfg(target_os = "motor")]
+fn motor_io_error(error: moto_rt::Error) -> std::io::Error {
+    let error_code: moto_rt::ErrorCode = error.into();
+    std::io::Error::from_raw_os_error(error_code.into())
+}
+
+#[cfg(target_os = "motor")]
+fn motor_system_time(nanos: u128) -> Option<SystemTime> {
+    if nanos == 0 {
+        return None;
+    }
+    let seconds = u64::try_from(nanos / 1_000_000_000).ok()?;
+    let nanoseconds = u32::try_from(nanos % 1_000_000_000).ok()?;
+    std::time::UNIX_EPOCH.checked_add(std::time::Duration::new(seconds, nanoseconds))
 }
 
 #[cfg(unix)]

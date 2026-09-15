@@ -65,6 +65,7 @@ filetime = "0.2.29"
 
 [target.'cfg(target_os = "motor")'.dependencies]
 gix-motor-filetime = { path = "../gix-motor-filetime" }
+moto-rt = "0.17.6"
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1.1.2", default-features = false, features = [
