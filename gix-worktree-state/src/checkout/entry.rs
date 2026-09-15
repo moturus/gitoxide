@@ -353,14 +353,32 @@ pub(crate) fn finalize_entry(
 fn adjust_executable_bits(file: &std::fs::File, executable: bool) -> Result<(), std::io::Error> {
     use std::os::fd::AsRawFd;
 
-    let mut permissions = moto_rt::fs::PERM_READ | moto_rt::fs::PERM_WRITE;
-    if executable {
-        permissions |= moto_rt::fs::PERM_EXEC;
+    let fd = file.as_raw_fd();
+    let read_write = moto_rt::fs::PERM_READ | moto_rt::fs::PERM_WRITE;
+    let desired = if executable {
+        read_write | moto_rt::fs::PERM_EXEC
+    } else {
+        read_write
+    };
+    let current = moto_rt::fs::get_file_attr(fd).map_err(motor_io_error)?.perm;
+    if current == desired {
+        return Ok(());
     }
-    moto_rt::fs::set_file_perm(file.as_raw_fd(), permissions).map_err(|error| {
-        let error_code: moto_rt::ErrorCode = error.into();
-        std::io::Error::from_raw_os_error(error_code.into())
-    })
+
+    if executable {
+        let read_execute = moto_rt::fs::PERM_READ | moto_rt::fs::PERM_EXEC;
+        if current != read_execute {
+            // Motor permits adding write to RX, while adding execute directly to RW is forbidden.
+            moto_rt::fs::set_file_perm(fd, read_execute).map_err(motor_io_error)?;
+        }
+    }
+    moto_rt::fs::set_file_perm(fd, desired).map_err(motor_io_error)
+}
+
+#[cfg(target_os = "motor")]
+fn motor_io_error(error: moto_rt::Error) -> std::io::Error {
+    let error_code: moto_rt::ErrorCode = error.into();
+    std::io::Error::from_raw_os_error(error_code.into())
 }
 
 /// Use `fstat` and, if needed, `fchmod` on a file descriptor to adjust whether a regular file is executable.

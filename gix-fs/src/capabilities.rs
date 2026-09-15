@@ -130,13 +130,15 @@ impl Capabilities {
             .open(&test_path)?;
         let fd = file.as_raw_fd();
         let read_write = moto_rt::fs::PERM_READ | moto_rt::fs::PERM_WRITE;
+        let read_execute = moto_rt::fs::PERM_READ | moto_rt::fs::PERM_EXEC;
+        let read_write_execute = read_write | moto_rt::fs::PERM_EXEC;
         let res = (|| {
-            moto_rt::fs::set_file_perm(fd, read_write | moto_rt::fs::PERM_EXEC).map_err(motor_io_error)?;
-            let set_works = moto_rt::fs::get_file_attr(fd).map_err(motor_io_error)?.perm & moto_rt::fs::PERM_EXEC != 0;
+            moto_rt::fs::set_file_perm(fd, read_execute).map_err(motor_io_error)?;
+            moto_rt::fs::set_file_perm(fd, read_write_execute).map_err(motor_io_error)?;
+            let set_works = moto_rt::fs::get_file_attr(fd).map_err(motor_io_error)?.perm == read_write_execute;
 
             moto_rt::fs::set_file_perm(fd, read_write).map_err(motor_io_error)?;
-            let clear_works =
-                moto_rt::fs::get_file_attr(fd).map_err(motor_io_error)?.perm & moto_rt::fs::PERM_EXEC == 0;
+            let clear_works = moto_rt::fs::get_file_attr(fd).map_err(motor_io_error)?.perm == read_write;
             Ok(set_works && clear_works)
         })();
         drop(file);
