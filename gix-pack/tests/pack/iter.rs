@@ -24,6 +24,56 @@ mod new_from_header {
     use crate::{SMALL_PACK, V2_PACKS_AND_INDICES, fixture_path};
 
     #[test]
+    fn rejects_v3_and_handles_empty_pack_trailers_by_mode() -> crate::Result {
+        let v3 = pack::data::header::encode(pack::data::Version::V3, 0);
+        let result = pack::data::input::BytesToEntriesIter::new_from_header(
+            std::io::BufReader::new(v3.as_slice()),
+            Mode::Verify,
+            EntryDataMode::Ignore,
+            gix_hash::Kind::Sha1,
+        );
+        assert!(matches!(
+            result,
+            Err(pack::data::input::Error::PackParse(
+                pack::data::header::decode::Error::UnsupportedVersion(3)
+            ))
+        ));
+
+        let header = pack::data::header::encode(pack::data::Version::V2, 0);
+        let mut hasher = gix_hash::hasher(gix_hash::Kind::Sha1);
+        hasher.update(&header);
+        let correct = hasher.try_finalize()?;
+        let wrong = [0; 20];
+        for (mode, missing_ok, wrong_ok) in [
+            (Mode::AsIs, false, true),
+            (Mode::Verify, false, false),
+            (Mode::Restore, true, true),
+        ] {
+            for (name, trailer, expected_ok) in [
+                ("missing", None, missing_ok),
+                ("wrong", Some(wrong.as_slice()), wrong_ok),
+                ("correct", Some(correct.as_slice()), true),
+            ] {
+                let mut data = header.to_vec();
+                if let Some(trailer) = trailer {
+                    data.extend_from_slice(trailer);
+                }
+                let result = pack::data::input::BytesToEntriesIter::new_from_header(
+                    std::io::BufReader::new(data.as_slice()),
+                    mode,
+                    EntryDataMode::Ignore,
+                    gix_hash::Kind::Sha1,
+                );
+                assert_eq!(result.is_ok(), expected_ok, "{mode:?} with {name} trailer");
+                if let Ok(mut iter) = result {
+                    assert!(iter.next().is_none(), "an empty pack yields no entries");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn header_encode() -> Result<(), Box<dyn std::error::Error>> {
         for (_, data_file) in V2_PACKS_AND_INDICES {
             let data = fs::read(fixture_path(data_file))?;

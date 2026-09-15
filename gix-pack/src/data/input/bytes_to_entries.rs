@@ -45,6 +45,7 @@ where
     /// `object_hash` specifies which hash is used for objects in ref-delta entries.
     ///
     /// Note that `read` is expected at the beginning of a valid pack data file with a header, entries and a trailer.
+    /// Version 3 packs are rejected, and the trailer of an empty pack is handled during construction according to `mode`.
     pub fn new_from_header(
         mut read: BR,
         mode: input::Mode,
@@ -55,12 +56,13 @@ where
         read.read_exact(&mut header_data).map_err(gix_hash::io::Error::from)?;
 
         let (version, num_objects) = crate::data::header::decode(&header_data)?;
-        assert_eq!(
-            version,
-            crate::data::Version::V2,
-            "let's stop here if we see undocumented pack formats"
-        );
-        Ok(BytesToEntriesIter {
+        match version {
+            crate::data::Version::V2 => {}
+            crate::data::Version::V3 => {
+                return Err(crate::data::header::decode::Error::UnsupportedVersion(3).into());
+            }
+        }
+        let mut iter = BytesToEntriesIter {
             read,
             decompressor: Decompress::new(),
             compressed,
@@ -77,7 +79,11 @@ where
             compressed_buf: None,
             hash_len: object_hash.len_in_bytes(),
             object_hash,
-        })
+        };
+        if num_objects == 0 {
+            iter.try_read_trailer()?;
+        }
+        Ok(iter)
     }
 
     fn next_inner(&mut self) -> Result<input::Entry, input::Error> {
