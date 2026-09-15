@@ -3,7 +3,7 @@ use std::{
     time::{SystemTime, SystemTimeError},
 };
 
-use filetime::FileTime;
+use crate::FileTime;
 
 use crate::entry::Stat;
 

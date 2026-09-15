@@ -1,0 +1,13 @@
+lints.workspace = true
+
+[package]
+name = "gix-motor-filetime"
+version = "0.1.0"
+repository = "https://github.com/GitoxideLabs/gitoxide"
+license = "MIT OR Apache-2.0"
+description = "The small file timestamp surface gitoxide needs on Motor OS"
+edition = "2024"
+rust-version = "1.85"
+
+[lib]
+doctest = false

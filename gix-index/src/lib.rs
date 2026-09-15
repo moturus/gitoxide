@@ -9,9 +9,12 @@
 use std::{ops::Range, path::PathBuf};
 
 use bstr::{BStr, ByteSlice};
+#[cfg(not(target_os = "motor"))]
 use filetime::FileTime;
 /// `gix_hash` is made available as it's part of the public API in various places.
 pub use gix_hash as hash;
+#[cfg(target_os = "motor")]
+use gix_motor_filetime::FileTime;
 /// A re-export to allow calling [`State::from_tree()`].
 pub use gix_validate as validate;
 

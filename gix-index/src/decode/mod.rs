@@ -1,4 +1,4 @@
-use filetime::FileTime;
+use crate::FileTime;
 
 use crate::{Entry, State, Version, entry, extension};
 

@@ -2046,6 +2046,7 @@ dependencies = [
  "gix-hash",
  "gix-hashtable",
  "gix-lock",
+ "gix-motor-filetime",
  "gix-object",
  "gix-odb",
  "gix-testtools",
@@ -2132,6 +2133,10 @@ dependencies = [
  "termtree",
  "thiserror 2.0.18",
 ]
+
+[[package]]
+name = "gix-motor-filetime"
+version = "0.1.0"
 
 [[package]]
 name = "gix-motor-tempfile"
@@ -2473,6 +2478,7 @@ dependencies = [
  "gix-fs",
  "gix-hash",
  "gix-index",
+ "gix-motor-filetime",
  "gix-object",
  "gix-odb",
  "gix-path",
@@ -2690,6 +2696,7 @@ dependencies = [
  "gix-worktree",
  "gix-worktree-state",
  "io-close",
+ "moto-rt",
  "thiserror 2.0.18",
  "walkdir",
 ]
@@ -3687,6 +3694,12 @@ dependencies = [
  "memoffset",
  "pin-utils",
 ]
+
+[[package]]
+name = "moto-rt"
+version = "0.17.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8e7200c0150f580541a80917e0ade7f91c0e76d2d9f81e3735ebdb7a3862bef"
 
 [[package]]
 name = "nonempty"

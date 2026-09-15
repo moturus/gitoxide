@@ -30,7 +30,7 @@ pub mod from_tree {
         pub fn new(object_hash: gix_hash::Kind) -> Self {
             State {
                 object_hash,
-                timestamp: filetime::FileTime::now(),
+                timestamp: crate::FileTime::now(),
                 version: Version::V2,
                 entries: vec![],
                 path_backing: vec![],
@@ -97,7 +97,7 @@ pub mod from_tree {
 
             Ok(State {
                 object_hash: tree.kind(),
-                timestamp: filetime::FileTime::now(),
+                timestamp: crate::FileTime::now(),
                 version: Version::V2,
                 entries,
                 path_backing,

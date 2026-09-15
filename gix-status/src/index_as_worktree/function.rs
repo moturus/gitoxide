@@ -6,9 +6,12 @@ use std::{
 };
 
 use bstr::BStr;
+#[cfg(not(target_os = "motor"))]
 use filetime::FileTime;
 use gix_features::parallel::{Reduce, in_parallel_if};
 use gix_filter::pipeline::convert::ToGitOutcome;
+#[cfg(target_os = "motor")]
+use gix_motor_filetime::FileTime;
 use gix_object::FindExt;
 
 #[cfg(windows)]

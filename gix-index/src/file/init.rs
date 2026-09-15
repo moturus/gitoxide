@@ -91,7 +91,7 @@ impl File {
                 }
             }
 
-            (data, filetime::FileTime::from_last_modification_time(&file.metadata()?))
+            (data, crate::FileTime::from_last_modification_time(&file.metadata()?))
         };
 
         let (state, checksum) = State::from_bytes(&data, mtime, object_hash, options)?;

@@ -12,7 +12,28 @@ use gix_filter::{
 use gix_index::{Entry, entry::Stat};
 use gix_object::FindExt;
 use gix_worktree::Stack;
+#[cfg(not(target_os = "motor"))]
 use io_close::Close;
+#[cfg(target_os = "motor")]
+use motor_io_close::Close;
+
+#[cfg(target_os = "motor")]
+mod motor_io_close {
+    use std::{fs::File, io, os::fd::IntoRawFd};
+
+    pub(super) trait Close {
+        fn close(self) -> io::Result<()>;
+    }
+
+    impl Close for File {
+        fn close(self) -> io::Result<()> {
+            moto_rt::fs::close(self.into_raw_fd()).map_err(|error| {
+                let error_code: moto_rt::ErrorCode = error.into();
+                io::Error::from_raw_os_error(error_code.into())
+            })
+        }
+    }
+}
 
 pub struct Context<'a, Find> {
     pub objects: &'a mut Find,

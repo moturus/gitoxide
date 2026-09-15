@@ -1,7 +1,7 @@
 use std::{cmp::Ordering, ops::Range};
 
+use crate::FileTime;
 use bstr::{BStr, ByteSlice, ByteVec};
-use filetime::FileTime;
 
 use crate::{
     AccelerateLookup, Entry, PathStorage, PathStorageRef, State, Version, entry,
