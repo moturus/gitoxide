@@ -18,6 +18,13 @@
 use gix_error::{Exn, Message};
 use std::path::Path;
 
+/// The default memory-backed storage for commit-graph files.
+#[cfg(not(target_os = "motor"))]
+pub use memmap2::Mmap as MMap;
+/// The default memory-backed storage for commit-graph files.
+#[cfg(target_os = "motor")]
+pub type MMap = Vec<u8>;
+
 /// A single commit-graph file.
 ///
 /// All operations on a `File` are local to that graph file. Since a commit graph can span multiple
@@ -26,7 +33,7 @@ pub struct File {
     base_graph_count: u8,
     base_graphs_list_offset: Option<usize>,
     commit_data_offset: usize,
-    data: memmap2::Mmap,
+    data: MMap,
     extra_edges_list_range: Option<std::ops::Range<usize>>,
     fan: [u32; file::FAN_LEN],
     oid_lookup_offset: usize,

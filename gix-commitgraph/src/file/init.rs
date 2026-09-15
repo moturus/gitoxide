@@ -21,12 +21,12 @@ impl File {
         Self::try_from(path.as_ref())
     }
 
-    /// A lower-level constructor which constructs a new instance directly from the mapping in `data`,
+    /// A lower-level constructor which constructs a new instance directly from the backing storage in `data`,
     /// assuming that it originated from `path`.
     ///
     /// Note that `path` is only used for verification of the hash its basename contains, but otherwise
     /// is not of importance.
-    pub fn new(data: memmap2::Mmap, path: PathBuf) -> Result<File, Exn<Message>> {
+    pub fn new(data: crate::MMap, path: PathBuf) -> Result<File, Exn<Message>> {
         let data_size = data.len();
         if data_size < MIN_FILE_SIZE {
             return Err(message("Commit-graph file too small even for an empty graph").raise());
@@ -178,6 +178,10 @@ impl TryFrom<&Path> for File {
     type Error = Exn<Message>;
 
     fn try_from(path: &Path) -> Result<Self, Self::Error> {
+        #[cfg(target_os = "motor")]
+        let data = std::fs::read(path)
+            .or_raise(|| message!("Could not open commit-graph file at '{path}'", path = path.display()))?;
+        #[cfg(not(target_os = "motor"))]
         let data = std::fs::File::open(path)
             .and_then(|file| {
                 // SAFETY: we have to take the risk of somebody changing the file underneath. Git never writes into the same file.

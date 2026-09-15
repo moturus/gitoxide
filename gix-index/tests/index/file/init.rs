@@ -31,6 +31,24 @@ mod at_or_new {
     }
 }
 
+#[test]
+fn an_index_shorter_than_its_checksum_is_rejected() -> gix_testtools::Result {
+    let dir = gix_testtools::tempfile::tempdir()?;
+    let path = dir.path().join("index");
+    std::fs::write(&path, b"x")?;
+
+    let err = gix_index::File::at(&path, gix_hash::Kind::Sha1, false, Default::default())
+        .expect_err("a truncated index must return an error");
+    assert!(matches!(
+        err,
+        gix_index::file::init::Error::Decode(gix_index::decode::Error::UnexpectedTrailerLength {
+            expected: 20,
+            actual: 1
+        })
+    ));
+    Ok(())
+}
+
 mod from_state {
     use gix_index::Version::{V2, V3};
 

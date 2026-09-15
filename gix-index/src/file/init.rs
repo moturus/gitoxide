@@ -59,35 +59,46 @@ impl File {
         let _span = gix_features::trace::detail!("gix_index::File::at()");
         let path = path.into();
         let (data, mtime) = {
+            #[cfg(target_os = "motor")]
             let mut file = std::fs::File::open(&path)?;
+            #[cfg(not(target_os = "motor"))]
+            let file = std::fs::File::open(&path)?;
+            #[cfg(target_os = "motor")]
+            let data = {
+                use std::io::Read;
+                let mut data = Vec::new();
+                file.read_to_end(&mut data)?;
+                data
+            };
+            #[cfg(not(target_os = "motor"))]
             // SAFETY: we have to take the risk of somebody changing the file underneath. Git never writes into the same file.
             #[expect(unsafe_code)]
             let data = unsafe { memmap2::MmapOptions::new().map_copy_read_only(&file)? };
 
             if !skip_hash {
+                let hash_len = object_hash.len_in_bytes();
+                if data.len() < hash_len {
+                    return Err(decode::Error::UnexpectedTrailerLength {
+                        expected: hash_len,
+                        actual: data.len(),
+                    }
+                    .into());
+                }
                 // Note that even though it's trivial to offload this into a thread, which is worth it for all but the smallest
                 // index files, we choose more safety here just like git does and don't even try to decode the index if the hashes
                 // don't match.
                 // Thanks to `skip_hash`, we can get performance and it's under caller control, at the cost of some safety.
-                let expected =
-                    gix_hash::ObjectId::from_bytes_or_panic(&data[data.len() - object_hash.len_in_bytes()..]);
+                let content_len = data.len() - hash_len;
+                let expected = gix_hash::ObjectId::from_bytes_or_panic(&data[content_len..]);
                 if !expected.is_null() {
                     let _span = gix_features::trace::detail!("gix::open_index::hash_index", path = ?path);
-                    let meta = file.metadata()?;
-                    let num_bytes_to_hash = meta.len() - object_hash.len_in_bytes() as u64;
-                    gix_hash::bytes(
-                        &mut file,
-                        num_bytes_to_hash,
-                        object_hash,
-                        &mut gix_features::progress::Discard,
-                        &Default::default(),
-                    )
-                    .map_err(|err| match err {
-                        gix_hash::io::Error::Io(err) => Error::Io(err),
-                        gix_hash::io::Error::Hasher(err) => Error::Decode(err.into()),
-                    })?
-                    .verify(&expected)
-                    .map_err(decode::Error::from)?;
+                    let mut hasher = gix_hash::hasher(object_hash);
+                    hasher.update(&data[..content_len]);
+                    hasher
+                        .try_finalize()
+                        .map_err(decode::Error::from)?
+                        .verify(&expected)
+                        .map_err(decode::Error::from)?;
                 }
             }
 

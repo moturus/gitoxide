@@ -10,6 +10,7 @@ impl AsRef<[u8]> for packed::Backing {
     fn as_ref(&self) -> &[u8] {
         match self {
             packed::Backing::InMemory(data) => data,
+            #[cfg(not(target_os = "motor"))]
             packed::Backing::Mapped(map) => map,
         }
     }
@@ -75,11 +76,19 @@ pub mod open {
         ///
         /// In order to allow fast lookups and optimizations, the contents of the packed refs must be sorted.
         /// If that's not the case, they will be sorted on the fly with the data being written into a memory buffer.
+        ///
+        /// On Motor OS, the file is always read into an owned buffer and the memory-map threshold is ignored.
         pub fn open(
             path: PathBuf,
             use_memory_map_if_larger_than_bytes: u64,
             object_hash: gix_hash::Kind,
         ) -> Result<Self, Error> {
+            #[cfg(target_os = "motor")]
+            let backing = {
+                let _ = use_memory_map_if_larger_than_bytes;
+                packed::Backing::InMemory(std::fs::read(&path)?)
+            };
+            #[cfg(not(target_os = "motor"))]
             let backing = if std::fs::metadata(&path)?.len() <= use_memory_map_if_larger_than_bytes {
                 packed::Backing::InMemory(std::fs::read(&path)?)
             } else {
