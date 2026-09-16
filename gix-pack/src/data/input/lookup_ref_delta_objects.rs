@@ -89,8 +89,8 @@ where
                 Header::RefDelta { base_id } => {
                     match self.inserted_entry_length_at_offset.iter().rfind(|e| e.oid == base_id) {
                         None => {
-                            let base_entry = match self.lookup.try_find(&base_id, &mut self.buf).ok()? {
-                                Some(obj) => {
+                            let base_entry = match self.lookup.try_find(&base_id, &mut self.buf) {
+                                Ok(Some(obj)) => {
                                     let current_pack_offset = entry.pack_offset;
                                     let mut entry = match input::Entry::from_data_obj(&obj, 0, self.compression) {
                                         Ok(e) => e,
@@ -105,9 +105,15 @@ where
                                     );
                                     entry
                                 }
-                                None => {
+                                Ok(None) => {
                                     entry.pack_offset = self.shifted_pack_offset(entry.pack_offset);
                                     return Some(Ok(entry));
+                                }
+                                Err(source) => {
+                                    return Some(Err(input::Error::Find {
+                                        object_id: base_id,
+                                        source,
+                                    }));
                                 }
                             };
 

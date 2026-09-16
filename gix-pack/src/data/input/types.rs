@@ -5,6 +5,11 @@
 pub enum Error {
     #[error("An IO operation failed while streaming an entry")]
     Io(#[from] gix_hash::io::Error),
+    #[error("Failed to look up ref-delta base object {object_id}")]
+    Find {
+        object_id: gix_hash::ObjectId,
+        source: gix_object::find::Error,
+    },
     #[error(transparent)]
     PackParse(#[from] crate::data::header::decode::Error),
     #[error("Failed to verify pack checksum in trailer")]

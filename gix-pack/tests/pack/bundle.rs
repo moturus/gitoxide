@@ -89,7 +89,7 @@ mod locate {
 mod write_to_directory {
     use std::{
         fs,
-        io::{Cursor, Write},
+        io::{self, Cursor, Write},
         path::Path,
         sync::atomic::AtomicBool,
     };
@@ -218,6 +218,56 @@ mod write_to_directory {
         Ok(())
     }
 
+    struct FailingLookup;
+
+    impl gix_object::Find for FailingLookup {
+        fn try_find<'a>(
+            &self,
+            _id: &gix_hash::oid,
+            _buffer: &'a mut Vec<u8>,
+        ) -> Result<Option<gix_object::Data<'a>>, gix_object::find::Error> {
+            Err(io::Error::other("controlled base-object read failure").into())
+        }
+    }
+
+    #[test]
+    fn external_base_lookup_errors_do_not_persist_shortened_packs() -> Result<(), Box<dyn std::error::Error>> {
+        for prefix in [true, false] {
+            let (pack_data, base_id) = thin_pack_with_missing_base(prefix)?;
+            let directory = TempDir::new()?;
+            let error = pack::Bundle::write_to_directory(
+                &mut Cursor::new(pack_data),
+                Some(directory.as_ref()),
+                &mut progress::Discard,
+                &AtomicBool::new(false),
+                Some(FailingLookup),
+                pack::bundle::write::Options {
+                    thread_limit: Some(1),
+                    iteration_mode: pack::data::input::Mode::Verify,
+                    index_version: pack::index::Version::V2,
+                    object_hash: gix_hash::Kind::Sha1,
+                    alloc_limit_bytes: None,
+                    compression: gix_zlib::Compression::BEST_SPEED,
+                },
+            )
+            .expect_err("a base lookup error must fail bundle writing");
+            assert!(
+                error_chain_contains_message(&error, &format!("Failed to look up ref-delta base object {base_id}")),
+                "the base object ID is retained in the error chain"
+            );
+            assert!(
+                error_chain_contains_message(&error, "controlled base-object read failure"),
+                "the lookup source is retained in the error chain"
+            );
+            assert_eq!(
+                fs::read_dir(directory.as_ref())?.count(),
+                0,
+                "a failed lookup must not persist a shortened pack"
+            );
+        }
+        Ok(())
+    }
+
     #[test]
     fn unresolved_ref_delta_base_is_reported() -> Result<(), Box<dyn std::error::Error>> {
         let object_hash = gix_hash::Kind::Sha1;
@@ -312,6 +362,23 @@ mod write_to_directory {
             },
         )
         .map_err(Into::into)
+    }
+
+    fn thin_pack_with_missing_base(prefix: bool) -> Result<(Vec<u8>, gix_hash::ObjectId), Box<dyn std::error::Error>> {
+        let object_hash = gix_hash::Kind::Sha1;
+        let mut data = pack::data::header::encode(pack::data::Version::V2, if prefix { 2 } else { 1 }).to_vec();
+        if prefix {
+            pack::data::entry::Header::Blob.write_to(1, &mut data)?;
+            data.extend(deflate(b"P")?);
+        }
+        let base_id = gix_object::compute_hash(object_hash, gix_object::Kind::Blob, b"A")?;
+        let delta = [1, 1, 1, b'B'];
+        pack::data::entry::Header::RefDelta { base_id }.write_to(delta.len() as u64, &mut data)?;
+        data.extend(deflate(&delta)?);
+        let mut hasher = gix_hash::hasher(object_hash);
+        hasher.update(&data);
+        data.extend_from_slice(hasher.try_finalize()?.as_slice());
+        Ok((data, base_id))
     }
 
     /// Build a complete pack whose one-byte blobs form a forward `REF_DELTA` chain.
