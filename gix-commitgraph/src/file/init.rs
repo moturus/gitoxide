@@ -179,7 +179,8 @@ impl TryFrom<&Path> for File {
 
     fn try_from(path: &Path) -> Result<Self, Self::Error> {
         #[cfg(target_os = "motor")]
-        let data = std::fs::read(path)
+        let data = crate::native::Reader::for_file()
+            .read(path)
             .or_raise(|| message!("Could not open commit-graph file at '{path}'", path = path.display()))?;
         #[cfg(not(target_os = "motor"))]
         let data = std::fs::File::open(path)

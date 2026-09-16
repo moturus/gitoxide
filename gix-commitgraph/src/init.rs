@@ -1,9 +1,10 @@
 use crate::{File, Graph, MAX_COMMITS};
 use gix_error::{ErrorExt, Exn, Message, ResultExt, message};
-use std::{
-    io::{BufRead, BufReader},
-    path::Path,
-};
+#[cfg(not(target_os = "motor"))]
+use std::io::BufReader;
+#[cfg(target_os = "motor")]
+use std::io::Cursor;
+use std::{io::BufRead, path::Path};
 
 /// Instantiate a `Graph` from various sources.
 impl Graph {
@@ -22,8 +23,22 @@ impl Graph {
                 chain_file_path.display()
             )
         })?;
+        #[cfg(target_os = "motor")]
+        let chain_file = Cursor::new(
+            gix_features::fs::read_to_end_bounded(&chain_file, crate::native::MAX_CHAIN_BYTES).or_raise(|| {
+                message!(
+                    "Could not read from commit-graph file at '{}'",
+                    chain_file_path.display()
+                )
+            })?,
+        );
+        #[cfg(not(target_os = "motor"))]
+        let chain_file = BufReader::new(chain_file);
+        #[cfg(target_os = "motor")]
+        let mut reader = crate::native::Reader::for_graph();
+
         let mut files = Vec::new();
-        for line in BufReader::new(chain_file).lines() {
+        for line in chain_file.lines() {
             let hash = line.or_raise(|| {
                 message!(
                     "Could not read from commit-graph file at '{}'",
@@ -31,9 +46,17 @@ impl Graph {
                 )
             })?;
             let graph_file_path = commit_graphs_dir.join(format!("graph-{hash}.graph"));
+            #[cfg(target_os = "motor")]
+            let file = {
+                let data = reader
+                    .read(&graph_file_path)
+                    .or_raise(|| message!("Could not open commit-graph file at '{}'", graph_file_path.display()))?;
+                File::new(data, graph_file_path.clone())
+            };
+            #[cfg(not(target_os = "motor"))]
+            let file = File::at(&graph_file_path);
             files.push(
-                File::at(&graph_file_path)
-                    .or_raise(|| message!("Could not open commit-graph file at '{}'", graph_file_path.display()))?,
+                file.or_raise(|| message!("Could not open commit-graph file at '{}'", graph_file_path.display()))?,
             );
         }
         Ok(Self::new(files)?)

@@ -1732,6 +1732,7 @@ dependencies = [
  "gix-chunk",
  "gix-date",
  "gix-error",
+ "gix-features",
  "gix-hash",
  "gix-testtools",
  "memmap2",

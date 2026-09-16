@@ -60,6 +60,8 @@ mod access;
 pub mod file;
 ///
 pub mod init;
+#[cfg(any(target_os = "motor", test))]
+mod native;
 pub mod verify;
 
 /// The number of generations that are considered 'infinite' commit history.
