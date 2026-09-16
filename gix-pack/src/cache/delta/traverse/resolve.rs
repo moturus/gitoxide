@@ -122,13 +122,13 @@ struct WorkItem<'a, T: Send> {
 }
 
 /// Conservatively charges each new requested capacity; reuse is free and charges are never refunded.
-struct AllocationBudget {
+pub(super) struct AllocationBudget {
     remaining: Option<AtomicUsize>,
     alloc_limit_bytes: Option<usize>,
 }
 
 impl AllocationBudget {
-    fn for_target(alloc_limit_bytes: Option<usize>) -> Self {
+    pub(super) fn for_target(alloc_limit_bytes: Option<usize>) -> Self {
         #[cfg(target_os = "motor")]
         let remaining = Some(512 * 1024 * 1024);
         #[cfg(not(target_os = "motor"))]
@@ -162,6 +162,13 @@ impl AllocationBudget {
         }
         out.try_reserve_exact(additional).map_err(Into::into)
     }
+
+    pub(super) fn copy(&self, bytes: &[u8]) -> Result<Vec<u8>, Error> {
+        let mut out = Vec::new();
+        resize_with_limit(&mut out, bytes.len(), self)?;
+        out.copy_from_slice(bytes);
+        Ok(out)
+    }
 }
 
 /// Resolve all delta trees from a shared, lock-free work-stealing pool.
@@ -183,7 +190,7 @@ pub(super) unsafe fn all<T, F, MBFN, E, R>(
     modify_base: MBFN,
     ref_delta_children: Option<super::SharedRefDeltaChildren>,
     object_hash: gix_hash::Kind,
-    alloc_limit_bytes: Option<usize>,
+    allocation_budget: &AllocationBudget,
     should_interrupt: &AtomicBool,
 ) -> Result<(), Error>
 where
@@ -193,7 +200,6 @@ where
     MBFN: FnMut(&mut T, &dyn Progress, Context<'_>) -> Result<(), E> + Send + Clone,
     E: std::error::Error + Send + Sync + 'static,
 {
-    let allocation_budget = AllocationBudget::for_target(alloc_limit_bytes);
     let work = items
         .iter_mut()
         .map(|item| {
@@ -221,7 +227,7 @@ where
             modify_base,
             ref_delta_children,
             object_hash,
-            &allocation_budget,
+            allocation_budget,
             should_interrupt,
         )
     }
@@ -239,10 +245,82 @@ where
             modify_base,
             ref_delta_children,
             object_hash,
-            &allocation_budget,
+            allocation_budget,
             should_interrupt,
         )
     }
+}
+
+/// Resolve children of one object obtained outside the pack, on the current thread.
+///
+/// SAFETY: Each index in `children` must uniquely refer to an item in `child_items` that has no
+/// other parent.
+#[expect(clippy::too_many_arguments, unsafe_code)]
+#[deny(unsafe_op_in_unsafe_fn)]
+pub(super) unsafe fn from_external<T, F, MBFN, E, R>(
+    children: Vec<u32>,
+    child_items: &ItemSliceSync<'_, Item<T>>,
+    kind: gix_object::Kind,
+    bytes: Vec<u8>,
+    objects: gix_features::progress::StepShared,
+    size: gix_features::progress::StepShared,
+    progress: &dyn Progress,
+    resolve: F,
+    resolve_data: &R,
+    modify_base: MBFN,
+    ref_delta_children: Option<super::SharedRefDeltaChildren>,
+    object_hash: gix_hash::Kind,
+    allocation_budget: &AllocationBudget,
+    should_interrupt: &AtomicBool,
+) -> Result<(), Error>
+where
+    T: Send,
+    R: Send + Sync,
+    F: for<'r> Fn(EntryRange, &'r R) -> Option<&'r [u8]> + Send + Clone,
+    MBFN: FnMut(&mut T, &dyn Progress, Context<'_>) -> Result<(), E> + Send + Clone,
+    E: std::error::Error + Send + Sync + 'static,
+{
+    let header = match kind {
+        gix_object::Kind::Tree => data::entry::Header::Tree,
+        gix_object::Kind::Blob => data::entry::Header::Blob,
+        gix_object::Kind::Commit => data::entry::Header::Commit,
+        gix_object::Kind::Tag => data::entry::Header::Tag,
+    };
+    let parent = OwnShared::new(ResolvedBase {
+        entry: data::Entry {
+            header,
+            decompressed_size: bytes.len().try_into().map_err(|_| Error::OutOfMemory)?,
+            data_offset: 0,
+            encoded_header_size: 0,
+        },
+        entry_end: 0,
+        bytes,
+    });
+    let mut work = Vec::new();
+    work.try_reserve_exact(children.len())?;
+    for index in children {
+        // SAFETY: Required from the caller, and every removed child index is unique.
+        let node = unsafe { Node::new(child_items.get_mut(index as usize), child_items) };
+        work.push(WorkItem {
+            level: 1,
+            node,
+            parent: Some(OwnShared::clone(&parent)),
+        });
+    }
+    drop(parent);
+    resolve_serial(
+        work,
+        objects,
+        size,
+        progress,
+        resolve,
+        resolve_data,
+        modify_base,
+        ref_delta_children,
+        object_hash,
+        allocation_budget,
+        should_interrupt,
+    )
 }
 
 /// Resolve all work on the current thread using `work` as a LIFO stack.
@@ -251,7 +329,6 @@ where
 /// the loop, so processing continues through dynamically scheduled descendants, including ref-delta children attached
 /// during resolution, until both they and the remaining roots are exhausted. LIFO order makes children of the current
 /// node run before roots that were already waiting.
-#[cfg(not(feature = "parallel"))]
 #[expect(clippy::too_many_arguments)]
 fn resolve_serial<T, F, MBFN, E, R>(
     mut work: Vec<WorkItem<'_, T>>,
@@ -574,10 +651,11 @@ where
     let has_children = node.has_children();
     inspect(&mut node, level, &resolved, progress, modify_base, objects, size)?;
     let mut reusable = if has_children {
+        let child_level = level.checked_add(1).ok_or(Error::DeltaDepthOverflow)?;
         let resolved = OwnShared::new(resolved);
         for child in node.into_child_iter() {
             push(WorkItem {
-                level: level + 1,
+                level: child_level,
                 node: child,
                 parent: Some(OwnShared::clone(&resolved)),
             });
@@ -737,6 +815,10 @@ mod tests {
         assert!(matches!(error, traverse::Error::AggregateAllocationLimit));
         assert_eq!(rejected, [1], "rejection happens before content mutation");
         assert_eq!(rejected.capacity(), old_capacity, "rejection happens before allocation");
+
+        let per_object = super::AllocationBudget::new(None, Some(0));
+        assert_eq!(per_object.copy(&[]).expect("empty data fits"), []);
+        assert!(matches!(per_object.copy(b"x"), Err(traverse::Error::OutOfMemory)));
     }
 
     #[test]
@@ -826,6 +908,134 @@ mod tests {
             max_active.load(Ordering::Relaxed) > expected,
             "idle workers must help with children of the last remaining root (if in parallel mode)"
         );
+    }
+
+    #[test]
+    #[cfg(feature = "streaming-input")]
+    fn external_bases_resolve_pending_chains_without_hiding_in_pack_objects() {
+        struct Lookup {
+            include_intermediate: bool,
+            wrong_root: bool,
+        }
+
+        impl gix_object::Find for Lookup {
+            fn try_find<'a>(
+                &self,
+                id: &gix_hash::oid,
+                out: &'a mut Vec<u8>,
+            ) -> Result<Option<gix_object::Data<'a>>, gix_object::find::Error> {
+                let a = gix_object::compute_hash(gix_hash::Kind::Sha1, gix_object::Kind::Blob, b"A")?;
+                let b = gix_object::compute_hash(gix_hash::Kind::Sha1, gix_object::Kind::Blob, b"B")?;
+                let data: Option<&[u8]> = if id == a {
+                    if self.wrong_root { Some(b"X") } else { Some(b"A") }
+                } else if id == b && self.include_intermediate {
+                    Some(b"B")
+                } else {
+                    None
+                };
+                Ok(data.map(|data| {
+                    out.clear();
+                    out.extend_from_slice(data);
+                    gix_object::Data {
+                        kind: gix_object::Kind::Blob,
+                        object_hash: gix_hash::Kind::Sha1,
+                        data: out,
+                    }
+                }))
+            }
+        }
+
+        let object_hash = gix_hash::Kind::Sha1;
+        let a = gix_object::compute_hash(object_hash, gix_object::Kind::Blob, b"A").expect("hash");
+        let b = gix_object::compute_hash(object_hash, gix_object::Kind::Blob, b"B").expect("hash");
+        let c = gix_object::compute_hash(object_hash, gix_object::Kind::Blob, b"C").expect("hash");
+        let mut pack = Vec::new();
+        let b_offset = append_entry(
+            &mut pack,
+            data::entry::Header::RefDelta { base_id: a },
+            4,
+            &[1, 1, 1, b'B'],
+        );
+        let c_offset = append_entry(
+            &mut pack,
+            data::entry::Header::RefDelta { base_id: b },
+            4,
+            &[1, 1, 1, b'C'],
+        );
+
+        for (include_intermediate, expected_candidates) in [(true, vec![a, b]), (false, vec![a])] {
+            let mut tree = Tree::with_capacity(2).expect("capacity is small");
+            tree.add_child_by_id(a, b_offset, object_hash.null())
+                .expect("offset is increasing");
+            tree.add_child_by_id(b, c_offset, object_hash.null())
+                .expect("offset is increasing");
+            let should_interrupt = AtomicBool::new(false);
+            let mut size_progress = progress::Discard;
+            let (outcome, mut candidates) = tree
+                .traverse_with_external_bases(
+                    |slice, pack| pack.get(slice.start as usize..slice.end as usize),
+                    &pack,
+                    pack.len() as u64,
+                    |id, _progress, context| {
+                        *id = gix_object::compute_hash(
+                            object_hash,
+                            context.entry.header.as_kind().expect("resolved kind"),
+                            context.decompressed,
+                        )?;
+                        Ok::<_, gix_hash::hasher::Error>(())
+                    },
+                    Some(&Lookup {
+                        include_intermediate,
+                        wrong_root: false,
+                    }),
+                    traverse::Options {
+                        object_progress: Box::new(progress::Discard),
+                        size_progress: &mut size_progress,
+                        thread_limit: Some(2),
+                        should_interrupt: &should_interrupt,
+                        object_hash,
+                        alloc_limit_bytes: None,
+                    },
+                )
+                .expect("external root completes the incoming chain");
+            let mut resolved = outcome.children.into_iter().map(|item| item.data).collect::<Vec<_>>();
+            resolved.sort();
+            candidates.sort();
+            let mut expected_candidates = expected_candidates;
+            expected_candidates.sort();
+            assert_eq!(resolved, [b, c]);
+            assert_eq!(candidates, expected_candidates);
+        }
+
+        let mut tree = Tree::with_capacity(1).expect("capacity is small");
+        tree.add_child_by_id(a, b_offset, ()).expect("offset is increasing");
+        let should_interrupt = AtomicBool::new(false);
+        let mut size_progress = progress::Discard;
+        let error = match tree.traverse_with_external_bases(
+            |slice, pack| pack.get(slice.start as usize..slice.end as usize),
+            &pack,
+            pack.len() as u64,
+            |(), _, _| Ok::<_, std::io::Error>(()),
+            Some(&Lookup {
+                include_intermediate: false,
+                wrong_root: true,
+            }),
+            traverse::Options {
+                object_progress: Box::new(progress::Discard),
+                size_progress: &mut size_progress,
+                thread_limit: Some(1),
+                should_interrupt: &should_interrupt,
+                object_hash,
+                alloc_limit_bytes: None,
+            },
+        ) {
+            Ok(_) => panic!("lookup data must hash to the requested object ID"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            traverse::Error::ExternalBaseIdMismatch { expected, .. } if expected == a
+        ));
     }
 
     #[test]

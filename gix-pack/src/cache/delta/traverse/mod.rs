@@ -38,6 +38,8 @@ pub enum Error {
     OutOfMemory,
     #[error("Delta traversal exceeds the cumulative allocation allowance")]
     AggregateAllocationLimit,
+    #[error("Delta depth exceeds the supported range")]
+    DeltaDepthOverflow,
     #[error(
         "The base at {base_pack_offset} was referred to by a ref-delta, but it was never added to the tree as if the pack was still thin."
     )]
@@ -49,6 +51,16 @@ pub enum Error {
     UnresolvedRefDelta {
         /// The id named by one or more unresolved ref-delta entries.
         base_id: gix_hash::ObjectId,
+    },
+    #[error("Failed to look up ref-delta base object {base_id}")]
+    ExternalBaseLookup {
+        base_id: gix_hash::ObjectId,
+        source: gix_object::find::Error,
+    },
+    #[error("External ref-delta base {expected} yielded object {actual}")]
+    ExternalBaseIdMismatch {
+        expected: gix_hash::ObjectId,
+        actual: gix_hash::ObjectId,
     },
     #[error("Failed to hash an object while resolving in-pack ref-deltas")]
     ObjectHash(#[from] gix_hash::hasher::Error),
@@ -127,11 +139,30 @@ where
     ///
     /// _Note_ that this method consumed the Tree to assure safe parallel traversal with mutation support.
     pub fn traverse<F, MBFN, E, R>(
+        self,
+        resolve: F,
+        resolve_data: &R,
+        pack_entries_end: u64,
+        inspect_object: MBFN,
+        options: Options<'_, '_>,
+    ) -> Result<Outcome<T>, Error>
+    where
+        F: for<'r> Fn(EntryRange, &'r R) -> Option<&'r [u8]> + Send + Clone,
+        R: Send + Sync,
+        MBFN: FnMut(&mut T, &dyn Progress, Context<'_>) -> Result<(), E> + Send + Clone,
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        self.traverse_with_external_bases(resolve, resolve_data, pack_entries_end, inspect_object, None, options)
+            .map(|(outcome, _external_bases)| outcome)
+    }
+
+    pub(crate) fn traverse_with_external_bases<F, MBFN, E, R>(
         mut self,
         resolve: F,
         resolve_data: &R,
         pack_entries_end: u64,
         inspect_object: MBFN,
+        lookup: Option<&dyn gix_object::Find>,
         Options {
             thread_limit,
             mut object_progress,
@@ -140,7 +171,7 @@ where
             object_hash,
             alloc_limit_bytes,
         }: Options<'_, '_>,
-    ) -> Result<Outcome<T>, Error>
+    ) -> Result<(Outcome<T>, Vec<gix_hash::ObjectId>), Error>
     where
         F: for<'r> Fn(EntryRange, &'r R) -> Option<&'r [u8]> + Send + Clone,
         R: Send + Sync,
@@ -164,6 +195,7 @@ where
         let ref_delta_children =
             (!ref_delta_children.is_empty()).then(|| OwnShared::new(Mutable::new(ref_delta_children)));
         let child_items = ItemSliceSync::new(&mut child_items_vec);
+        let allocation_budget = resolve::AllocationBudget::for_target(alloc_limit_bytes);
         // SAFETY: Both item slices come from the same Tree, whose child-index uniqueness invariant still holds.
         #[expect(unsafe_code)]
         unsafe {
@@ -172,17 +204,76 @@ where
                 &child_items,
                 thread_limit,
                 num_objects,
-                object_counter,
-                size_counter,
+                object_counter.clone(),
+                size_counter.clone(),
                 &resolver_progress,
-                resolve,
+                resolve.clone(),
                 resolve_data,
-                inspect_object,
+                inspect_object.clone(),
                 ref_delta_children.clone(),
                 object_hash,
-                alloc_limit_bytes,
+                &allocation_budget,
                 should_interrupt,
             )?;
+        }
+
+        let mut external_bases = Vec::new();
+        if let (Some(lookup), Some(ref_delta_children)) = (lookup, ref_delta_children.as_ref()) {
+            let pending = {
+                let pending = threading::lock(ref_delta_children);
+                let mut ids = Vec::new();
+                ids.try_reserve_exact(pending.len())?;
+                ids.extend(pending.keys().copied());
+                ids
+            };
+            external_bases.try_reserve_exact(pending.len())?;
+            let mut lookup_buf = Vec::new();
+            for base_id in pending {
+                if should_interrupt.load(std::sync::atomic::Ordering::Relaxed) {
+                    return Err(Error::Interrupted);
+                }
+                if !threading::lock(ref_delta_children).contains_key(&base_id) {
+                    continue;
+                }
+                let Some(data) = lookup
+                    .try_find(&base_id, &mut lookup_buf)
+                    .map_err(|source| Error::ExternalBaseLookup { base_id, source })?
+                else {
+                    continue;
+                };
+                let actual = gix_object::compute_hash(object_hash, data.kind, data.data)?;
+                if actual != base_id {
+                    return Err(Error::ExternalBaseIdMismatch {
+                        expected: base_id,
+                        actual,
+                    });
+                }
+                let bytes = allocation_budget.copy(data.data)?;
+                let children = threading::lock(ref_delta_children)
+                    .remove(&base_id)
+                    .ok_or(Error::UnresolvedRefDelta { base_id })?;
+                // SAFETY: Removed child indices have one parent and can't be processed again.
+                #[expect(unsafe_code)]
+                unsafe {
+                    resolve::from_external(
+                        children,
+                        &child_items,
+                        data.kind,
+                        bytes,
+                        object_counter.clone(),
+                        size_counter.clone(),
+                        &resolver_progress,
+                        resolve.clone(),
+                        resolve_data,
+                        inspect_object.clone(),
+                        Some(ref_delta_children.clone()),
+                        object_hash,
+                        &allocation_budget,
+                        should_interrupt,
+                    )?;
+                }
+                external_bases.push(base_id);
+            }
         }
 
         if let Some(ref_delta_children) = ref_delta_children {
@@ -194,9 +285,12 @@ where
         object_progress.show_throughput(start);
         size_progress.show_throughput(start);
 
-        Ok(Outcome {
-            roots: root_items,
-            children: child_items_vec,
-        })
+        Ok((
+            Outcome {
+                roots: root_items,
+                children: child_items_vec,
+            },
+            external_bases,
+        ))
     }
 }
