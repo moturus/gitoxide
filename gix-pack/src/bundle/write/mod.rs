@@ -266,9 +266,8 @@ impl crate::Bundle {
     ///
     /// * `progress` provides detailed progress information which can be discarded with [`gix_features::progress::Discard`].
     /// * `should_interrupt` is checked regularly and when true, the whole operation will stop.
-    /// * `thin_pack_base_object_lookup` If set, we expect to see a thin-pack with objects that reference their base object by object id which is
-    ///   expected to exist in the object database the bundle is contained within.
-    ///   `options` further configure how the task is performed.
+    /// * `thin_pack_base_object_lookup` supplies missing `REF_DELTA` bases. Bases already present in the incoming pack are
+    ///   preserved and aren't added again. `options` further configure how the task is performed.
     ///
     /// # Note
     ///

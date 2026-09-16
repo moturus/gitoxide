@@ -71,14 +71,11 @@ pub(super) mod function {
     ///
     /// # Ref-delta bases
     ///
-    /// Bases available through an ODB lookup are handled by wrapping `entries` in
-    /// [`crate::data::input::LookupRefDeltaObjectsIter`]. As entries are consumed, it inserts each full base immediately
-    /// before the first delta that needs it, then rewrites that and later references to the same base as `OFS_DELTA`s.
-    ///
-    /// Remaining `REF_DELTA`s are resolved in-pack here. They are recorded by base object ID; while traversing the delta
-    /// tree, each fully resolved object is hashed and any deltas waiting for that ID are attached as its children. Thus an
-    /// in-pack base may occur before or after its delta, and forward-reference chains are supported. Resolution fails if a
-    /// referenced base was neither inserted by the wrapper nor found among the pack entries.
+    /// `REF_DELTA`s are resolved from the supplied entries. They are recorded by base object ID; while traversing the
+    /// delta tree, each fully resolved object is hashed and any deltas waiting for that ID are attached as its children.
+    /// Thus an in-pack base may occur before or after its delta, and forward-reference chains are supported. Resolution
+    /// fails if a referenced base is absent from the entries. Use [`crate::Bundle::write_to_directory()`] or
+    /// [`crate::Bundle::write_to_directory_eagerly()`] to complete a thin pack from an object lookup.
     ///
     /// * `kind` is the version of pack index to produce, use [`crate::index::Version::default()`] if in doubt.
     /// * `tread_limit` is used for a parallel tree traversal for obtaining object hashes with optimal performance.

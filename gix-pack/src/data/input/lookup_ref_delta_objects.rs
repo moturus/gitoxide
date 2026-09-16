@@ -3,6 +3,10 @@ use gix_hash::ObjectId;
 use crate::data::{entry::Header, input};
 
 /// An iterator to resolve thin packs on the fly.
+///
+/// Every base returned by the lookup must be absent from the incoming entries, including bases
+/// which may themselves appear there as deltas. Use [`crate::Bundle::write_to_directory()`] or
+/// [`crate::Bundle::write_to_directory_eagerly()`] to safely complete arbitrary incoming packs.
 pub struct LookupRefDeltaObjectsIter<I, Find> {
     /// The inner iterator whose entries we will resolve.
     pub inner: I,

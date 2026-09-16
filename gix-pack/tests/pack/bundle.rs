@@ -321,6 +321,144 @@ mod write_to_directory {
         Ok(())
     }
 
+    #[derive(Clone, Copy)]
+    enum AppendFailure {
+        Missing,
+        Changed,
+        ReadError,
+    }
+
+    struct ChangingBase {
+        id: gix_hash::ObjectId,
+        reads: std::cell::Cell<usize>,
+        failure: AppendFailure,
+    }
+
+    impl gix_object::Find for ChangingBase {
+        fn try_find<'a>(
+            &self,
+            id: &gix_hash::oid,
+            _buffer: &'a mut Vec<u8>,
+        ) -> Result<Option<gix_object::Data<'a>>, gix_object::find::Error> {
+            if id != self.id.as_ref() {
+                return Ok(None);
+            }
+            let previous = self.reads.replace(self.reads.get() + 1);
+            let bytes = if previous == 0 {
+                b"A"
+            } else {
+                match self.failure {
+                    AppendFailure::Missing => return Ok(None),
+                    AppendFailure::Changed => b"B",
+                    AppendFailure::ReadError => {
+                        return Err(io::Error::other("controlled append read failure").into());
+                    }
+                }
+            };
+            Ok(Some(gix_object::Data {
+                kind: gix_object::Kind::Blob,
+                object_hash: id.kind(),
+                data: bytes,
+            }))
+        }
+    }
+
+    #[test]
+    fn external_base_changes_during_completion_leave_no_output() -> Result<(), Box<dyn std::error::Error>> {
+        for failure in [AppendFailure::Missing, AppendFailure::Changed, AppendFailure::ReadError] {
+            let (data, base_id) = thin_pack_with_missing_base(false)?;
+            let directory = TempDir::new()?;
+            let error = pack::Bundle::write_to_directory(
+                &mut Cursor::new(data),
+                Some(directory.as_ref()),
+                &mut progress::Discard,
+                &AtomicBool::new(false),
+                Some(ChangingBase {
+                    id: base_id,
+                    reads: std::cell::Cell::new(0),
+                    failure,
+                }),
+                bundle_options(pack::data::input::Mode::Verify),
+            )
+            .expect_err("the base must still match when appended");
+            let expected = match failure {
+                AppendFailure::Missing => {
+                    format!("External ref-delta base {base_id} disappeared during pack completion")
+                }
+                AppendFailure::Changed => {
+                    let changed = gix_object::compute_hash(gix_hash::Kind::Sha1, gix_object::Kind::Blob, b"B")?;
+                    format!("External ref-delta base {base_id} yielded object {changed} during pack completion")
+                }
+                AppendFailure::ReadError => format!("Failed to look up ref-delta base object {base_id}"),
+            };
+            assert!(error_chain_contains_message(&error, &expected), "{error:?}");
+            if matches!(failure, AppendFailure::ReadError) {
+                assert!(
+                    error_chain_contains_message(&error, "controlled append read failure"),
+                    "{error:?}"
+                );
+            }
+            assert_eq!(
+                fs::read_dir(directory.as_ref())?.count(),
+                0,
+                "do not publish partial completion"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn local_objects_cannot_hide_cyclic_pack_dependencies() -> Result<(), Box<dyn std::error::Error>> {
+        let hash = gix_hash::Kind::Sha1;
+        let a = gix_object::compute_hash(hash, gix_object::Kind::Blob, b"A")?;
+        let b = gix_object::compute_hash(hash, gix_object::Kind::Blob, b"B")?;
+        for pairs in [vec![(a, b'A')], vec![(b, b'A'), (a, b'B')]] {
+            let mut data = pack::data::header::encode(pack::data::Version::V2, pairs.len() as u32).to_vec();
+            for (base_id, result) in pairs {
+                let delta = [1, 1, 1, result];
+                pack::data::entry::Header::RefDelta { base_id }.write_to(delta.len() as u64, &mut data)?;
+                data.extend(deflate(&delta)?);
+            }
+            let mut hasher = gix_hash::hasher(hash);
+            hasher.update(&data);
+            data.extend_from_slice(hasher.try_finalize()?.as_slice());
+
+            let directory = TempDir::new()?;
+            let error = pack::Bundle::write_to_directory(
+                &mut Cursor::new(data),
+                Some(directory.as_ref()),
+                &mut progress::Discard,
+                &AtomicBool::new(false),
+                Some(ChangingBase {
+                    id: a,
+                    reads: std::cell::Cell::new(0),
+                    failure: AppendFailure::Missing,
+                }),
+                bundle_options(pack::data::input::Mode::Verify),
+            )
+            .expect_err("a local virtual root must not allow an unrooted pack to be published");
+            let object_id = match &error {
+                pack::bundle::write::Error::IndexWrite(pack::index::write::Error::UnrootedDeltaChain { object_id }) => {
+                    object_id
+                }
+                _ => panic!("expected an unrooted delta-chain error, got {error:?}"),
+            };
+            assert!(
+                error_chain_contains_message(
+                    &error,
+                    &format!("The received object {object_id} has no real root in the completed pack")
+                ),
+                "{error:?}"
+            );
+            assert_eq!(
+                fs::read_dir(directory.as_ref())?.count(),
+                0,
+                "cycle rejection removes owned temporary files"
+            );
+        }
+        Ok(())
+    }
+
     struct FailingLookup;
 
     impl gix_object::Find for FailingLookup {
