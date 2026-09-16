@@ -14,4 +14,11 @@ pub enum Error {
     Persist(#[from] gix_tempfile::handle::persist::Error<Writable>),
     #[error(transparent)]
     IndexWrite(#[from] crate::index::write::Error),
+    #[error("External ref-delta base {object_id} disappeared during pack completion")]
+    MissingExternalBase { object_id: gix_hash::ObjectId },
+    #[error("External ref-delta base {expected} yielded object {actual} during pack completion")]
+    ExternalBaseIdMismatch {
+        expected: gix_hash::ObjectId,
+        actual: gix_hash::ObjectId,
+    },
 }

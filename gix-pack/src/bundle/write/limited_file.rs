@@ -79,18 +79,25 @@ impl<W: io::Seek> io::Seek for LimitedFile<W> {
     }
 }
 
+impl LimitedFile<gix_tempfile::Handle<gix_tempfile::handle::Writable>> {
+    pub(super) fn truncate_and_seek(&mut self, len: u64) -> io::Result<()> {
+        self.inner.with_mut(|file| file.as_file_mut().set_len(len))??;
+        io::Seek::seek(self, io::SeekFrom::Start(len)).map(|_| ())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
         io::{self, Read, Seek, Write},
-        sync::Arc,
+        sync::{Arc, atomic::AtomicBool},
     };
 
     use gix_tempfile::{AutoRemove, ContainingDirectory};
 
     use super::LimitedFile;
     use crate::{
-        bundle::write::types::{LockWriter, SharedTempFile},
+        bundle::write::{Options, complete_pack, types::SharedTempFile},
         data,
     };
 
@@ -122,24 +129,31 @@ mod tests {
             handle,
             Some(31),
         ))));
-        let mut entries = data::input::EntriesToBytesIter::new(
-            std::iter::empty(),
-            LockWriter {
-                writer: Arc::clone(&writer),
-            },
+        writer.lock().write_all(&data::header::encode(data::Version::V2, 0))?;
+        let mut prepared = crate::index::Prepared {
+            items: Vec::new(),
+            missing_bases: Vec::new(),
+            pack_hash: None,
+            num_objects: 0,
+            entries_end: 12,
+        };
+        let options = Options {
+            iteration_mode: data::input::Mode::Restore,
+            ..Options::default()
+        };
+        let error = complete_pack::<gix_object::find::Never>(
+            &mut prepared,
+            &writer,
+            None,
             data::Version::V2,
-            gix_hash::Kind::Sha1,
-        );
-        let error = entries
-            .next()
-            .expect("trailer write failure is returned")
-            .expect_err("the empty pack trailer crosses the tiny extent");
+            &options,
+            &AtomicBool::new(false),
+        )
+        .expect_err("the empty pack trailer crosses the tiny extent");
         assert!(matches!(
             error,
-            data::input::Error::Io(gix_hash::io::Error::Io(err))
-                if err.kind() == io::ErrorKind::InvalidData
+            crate::bundle::write::Error::Io(err) if err.kind() == io::ErrorKind::InvalidData
         ));
-        drop(entries);
         drop(writer);
         assert!(
             std::fs::read_dir(dir.path())?.next().is_none(),

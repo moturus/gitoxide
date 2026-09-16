@@ -218,6 +218,109 @@ mod write_to_directory {
         Ok(())
     }
 
+    #[derive(Clone, Copy)]
+    struct BlobLookup {
+        data: &'static [u8],
+    }
+
+    impl gix_object::Find for BlobLookup {
+        fn try_find<'a>(
+            &self,
+            id: &gix_hash::oid,
+            buffer: &'a mut Vec<u8>,
+        ) -> Result<Option<gix_object::Data<'a>>, gix_object::find::Error> {
+            let actual = gix_object::compute_hash(gix_hash::Kind::Sha1, gix_object::Kind::Blob, self.data)
+                .expect("valid object hash");
+            if id != actual {
+                return Ok(None);
+            }
+            buffer.clear();
+            buffer.extend_from_slice(self.data);
+            Ok(Some(gix_object::Data {
+                kind: gix_object::Kind::Blob,
+                object_hash: id.kind(),
+                data: buffer.as_slice(),
+            }))
+        }
+    }
+
+    #[test]
+    fn completion_preserves_received_entries_and_restore_discards_prefetch() -> Result<(), Box<dyn std::error::Error>> {
+        let complete = ref_delta_pack(gix_hash::Kind::Sha1, &[b"A", b"B"])?;
+        for eager in [false, true] {
+            let directory = TempDir::new()?;
+            let outcome = write_test_pack(
+                complete.clone(),
+                directory.as_ref(),
+                pack::data::input::Mode::Verify,
+                eager,
+            )?;
+            assert_eq!(outcome.index.num_objects, 2);
+            assert_eq!(
+                fs::read(outcome.data_path.as_ref().expect("non-empty pack is persisted"))?,
+                complete,
+                "a complete pack remains byte-identical even if its base is available locally"
+            );
+        }
+
+        let (mut damaged_thin, _) = thin_pack_with_missing_base(false)?;
+        let received_entries_end = damaged_thin.len() - gix_hash::Kind::Sha1.len_in_bytes();
+        damaged_thin[8..12].copy_from_slice(&3_u32.to_be_bytes());
+        damaged_thin.extend_from_slice(b"raw prefetch which must be truncated");
+        for eager in [false, true] {
+            let directory = TempDir::new()?;
+            let outcome = write_test_pack(
+                damaged_thin.clone(),
+                directory.as_ref(),
+                pack::data::input::Mode::Restore,
+                eager,
+            )?;
+            assert_eq!(outcome.index.num_objects, 2);
+            let data_path = outcome.data_path.as_ref().expect("completed pack is persisted");
+            let completed = fs::read(data_path)?;
+            assert_eq!(
+                pack::data::header::decode(completed[..12].try_into()?)?,
+                (pack::data::Version::V2, 2),
+                "Restore rewrites the declared object count"
+            );
+            assert_eq!(
+                &completed[12..received_entries_end],
+                &damaged_thin[12..received_entries_end],
+                "the original delta bytes and offsets remain unchanged"
+            );
+            let pack_file = pack::data::File::at(data_path, gix_hash::Kind::Sha1)?;
+            assert_eq!(
+                pack_file.verify_checksum(&mut progress::Discard, &AtomicBool::new(false))?,
+                pack_file.checksum(),
+                "Restore replaces the checksum after truncating raw prefetch"
+            );
+            let mut entries = pack::data::input::BytesToEntriesIter::new_from_header(
+                io::BufReader::new(completed.as_slice()),
+                pack::data::input::Mode::Verify,
+                pack::data::input::EntryDataMode::Ignore,
+                gix_hash::Kind::Sha1,
+            )?;
+            assert_eq!(entries.by_ref().collect::<Result<Vec<_>, _>>()?.len(), 2);
+
+            let bundle = outcome.to_bundle().transpose()?.expect("bundle is persisted");
+            let mut buffer = Vec::new();
+            for expected in [b"A".as_slice(), b"B".as_slice()] {
+                let id = gix_object::compute_hash(gix_hash::Kind::Sha1, gix_object::Kind::Blob, expected)?;
+                let object = bundle
+                    .find(
+                        &id,
+                        &mut buffer,
+                        &mut gix_zlib::Inflate::default(),
+                        &mut pack::cache::Never,
+                    )?
+                    .expect("completed object is indexed")
+                    .0;
+                assert_eq!(object.data, expected);
+            }
+        }
+        Ok(())
+    }
+
     struct FailingLookup;
 
     impl gix_object::Find for FailingLookup {
@@ -337,6 +440,48 @@ mod write_to_directory {
 
     fn file_name(entry: &fs::DirEntry) -> String {
         entry.path().file_name().unwrap().to_str().unwrap().to_owned()
+    }
+
+    static BUNDLE_SHOULD_INTERRUPT: AtomicBool = AtomicBool::new(false);
+
+    fn write_test_pack(
+        data: Vec<u8>,
+        directory: &Path,
+        mode: pack::data::input::Mode,
+        eager: bool,
+    ) -> Result<pack::bundle::write::Outcome, pack::bundle::write::Error> {
+        let len = data.len() as u64;
+        if eager {
+            pack::Bundle::write_to_directory_eagerly(
+                Box::new(Cursor::new(data)),
+                Some(len),
+                Some(directory),
+                &mut progress::Discard,
+                &BUNDLE_SHOULD_INTERRUPT,
+                Some(BlobLookup { data: b"A" }),
+                bundle_options(mode),
+            )
+        } else {
+            pack::Bundle::write_to_directory(
+                &mut Cursor::new(data),
+                Some(directory),
+                &mut progress::Discard,
+                &BUNDLE_SHOULD_INTERRUPT,
+                Some(BlobLookup { data: b"A" }),
+                bundle_options(mode),
+            )
+        }
+    }
+
+    fn bundle_options(iteration_mode: pack::data::input::Mode) -> pack::bundle::write::Options {
+        pack::bundle::write::Options {
+            thread_limit: Some(1),
+            iteration_mode,
+            index_version: pack::index::Version::V2,
+            object_hash: gix_hash::Kind::Sha1,
+            alloc_limit_bytes: None,
+            compression: gix_zlib::Compression::BEST_SPEED,
+        }
     }
 
     fn write_pack(

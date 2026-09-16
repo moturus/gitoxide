@@ -123,6 +123,7 @@ pub(super) mod function {
             missing_bases,
             pack_hash,
             num_objects,
+            ..
         } = prepare_data_iter(
             make_resolver,
             entries,
@@ -163,6 +164,7 @@ pub(super) mod function {
         pub missing_bases: Vec<gix_hash::ObjectId>,
         pub pack_hash: Option<gix_hash::ObjectId>,
         pub num_objects: u32,
+        pub entries_end: u64,
     }
 
     #[expect(clippy::too_many_arguments)]
@@ -341,6 +343,7 @@ pub(super) mod function {
             missing_bases,
             pack_hash,
             num_objects,
+            entries_end: pack_entries_end,
         })
     }
 }

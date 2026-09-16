@@ -1,9 +1,12 @@
 use std::{
     io,
-    io::Write,
+    io::{Seek, Write},
     marker::PhantomData,
     path::{Path, PathBuf},
-    sync::{Arc, atomic::AtomicBool},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use gix_features::{interrupt, progress, progress::Progress};
@@ -18,7 +21,7 @@ use gix_features::progress::prodash::DynNestedProgress;
 mod limited_file;
 use limited_file::LimitedFile;
 mod types;
-use types::{LockWriter, PassThrough};
+use types::PassThrough;
 pub use types::{Options, Outcome};
 
 use crate::bundle::write::types::SharedTempFile;
@@ -34,6 +37,217 @@ pub enum ProgressId {
     ///
     /// Underneath will be more progress information related to actually producing the index.
     IndexingSteps(PhantomData<crate::index::write::ProgressId>),
+}
+
+#[expect(clippy::too_many_arguments)]
+fn prepare_complete_and_write<Find: gix_object::Find>(
+    options: Options,
+    data_file: SharedTempFile,
+    entries: &mut dyn Iterator<Item = Result<data::input::Entry, data::input::Error>>,
+    progress: &mut dyn DynNestedProgress,
+    index_out: &mut dyn io::Write,
+    should_interrupt: &AtomicBool,
+    pack_version: data::Version,
+    lookup: Option<&Find>,
+) -> Result<crate::index::write::Outcome, Error> {
+    let Options {
+        thread_limit,
+        index_version,
+        object_hash,
+        alloc_limit_bytes,
+        ..
+    } = options;
+    if index_version != crate::index::Version::default() {
+        return Err(crate::index::write::Error::Unsupported(index_version).into());
+    }
+    let start = std::time::Instant::now();
+    let mut prepared = crate::index::prepare_data_iter(
+        {
+            let data_file = Arc::clone(&data_file);
+            move || new_pack_file_resolver(data_file)
+        },
+        entries,
+        thread_limit,
+        progress,
+        should_interrupt,
+        object_hash,
+        alloc_limit_bytes,
+        pack_version,
+        lookup.map(|find| find as &dyn gix_object::Find),
+    )?;
+    let appended = !prepared.missing_bases.is_empty();
+    let pack_hash = complete_pack(
+        &mut prepared,
+        &data_file,
+        lookup,
+        pack_version,
+        &options,
+        should_interrupt,
+    )?;
+    if appended {
+        prepared.items.sort_by_key(|entry| entry.data.id);
+    }
+    if let Some(duplicate) = prepared
+        .items
+        .windows(2)
+        .find(|pair| pair[0].data.id == pair[1].data.id)
+    {
+        return Err(crate::index::write::Error::DuplicateObject {
+            object_id: duplicate[0].data.id,
+        }
+        .into());
+    }
+    let index_hash = crate::index::encode::write_to(
+        index_out,
+        prepared.items,
+        &pack_hash,
+        index_version,
+        object_hash,
+        &mut progress.add_child_with_id(
+            "writing index file".into(),
+            crate::index::write::ProgressId::IndexBytesWritten.into(),
+        ),
+    )
+    .map_err(crate::index::write::Error::Io)?;
+    progress.show_throughput_with(
+        start,
+        prepared.num_objects as usize,
+        progress::count("objects").expect("unit always set"),
+        progress::MessageLevel::Success,
+    );
+    Ok(crate::index::write::Outcome {
+        index_version,
+        index_hash,
+        data_hash: pack_hash,
+        num_objects: prepared.num_objects,
+    })
+}
+
+fn complete_pack<Find: gix_object::Find>(
+    prepared: &mut crate::index::Prepared,
+    data_file: &SharedTempFile,
+    lookup: Option<&Find>,
+    pack_version: data::Version,
+    options: &Options,
+    should_interrupt: &AtomicBool,
+) -> Result<gix_hash::ObjectId, Error> {
+    if should_interrupt.load(Ordering::Relaxed) {
+        return Err(
+            crate::index::write::Error::TreeTraversal(crate::cache::delta::traverse::Error::Interrupted).into(),
+        );
+    }
+    let rewrite = options.iteration_mode == data::input::Mode::Restore || !prepared.missing_bases.is_empty();
+    let mut writer = data_file.lock();
+    writer.flush()?;
+    if !rewrite {
+        let pack_hash = prepared
+            .pack_hash
+            .ok_or(crate::index::write::Error::IteratorInvariantTrailer)?;
+        let end = prepared
+            .entries_end
+            .checked_add(options.object_hash.len_in_bytes() as u64)
+            .ok_or_else(|| io::Error::other("pack length overflowed"))?;
+        writer.get_mut().truncate_and_seek(end)?;
+        return Ok(pack_hash);
+    }
+
+    let final_count = (prepared.num_objects as usize)
+        .checked_add(prepared.missing_bases.len())
+        .ok_or(crate::index::write::Error::IteratorInvariantTooManyObjects(usize::MAX))?;
+    let final_count_u32: u32 = final_count
+        .try_into()
+        .map_err(|_| crate::index::write::Error::IteratorInvariantTooManyObjects(final_count))?;
+    #[cfg(target_os = "motor")]
+    if final_count > 65_536 {
+        return Err(
+            crate::index::write::Error::Tree(crate::cache::delta::Error::EntryCountLimit { max_entries: 65_536 })
+                .into(),
+        );
+    }
+    prepared
+        .items
+        .try_reserve_exact(prepared.missing_bases.len())
+        .map_err(crate::index::write::Error::from)?;
+    writer.get_mut().truncate_and_seek(prepared.entries_end)?;
+
+    #[cfg(target_os = "motor")]
+    let alloc_limit_bytes = Some(
+        options
+            .alloc_limit_bytes
+            .unwrap_or(16 * 1024 * 1024)
+            .min(16 * 1024 * 1024),
+    );
+    #[cfg(not(target_os = "motor"))]
+    let alloc_limit_bytes = options.alloc_limit_bytes;
+    let mut lookup_buf = Vec::new();
+    for object_id in std::mem::take(&mut prepared.missing_bases) {
+        if should_interrupt.load(Ordering::Relaxed) {
+            return Err(
+                crate::index::write::Error::TreeTraversal(crate::cache::delta::traverse::Error::Interrupted).into(),
+            );
+        }
+        let lookup = lookup.ok_or(Error::MissingExternalBase { object_id })?;
+        let object = lookup
+            .try_find(&object_id, &mut lookup_buf)
+            .map_err(|source| data::input::Error::Find { object_id, source })?
+            .ok_or(Error::MissingExternalBase { object_id })?;
+        if alloc_limit_bytes.is_some_and(|limit| object.data.len() > limit) {
+            return Err(
+                crate::index::write::Error::TreeTraversal(crate::cache::delta::traverse::Error::OutOfMemory).into(),
+            );
+        }
+        let actual = gix_object::compute_hash(options.object_hash, object.kind, object.data)
+            .map_err(crate::cache::delta::traverse::Error::ObjectHash)
+            .map_err(crate::index::write::Error::TreeTraversal)?;
+        if actual != object_id {
+            return Err(Error::ExternalBaseIdMismatch {
+                expected: object_id,
+                actual,
+            });
+        }
+        let entry = data::input::Entry::from_data_obj(&object, prepared.entries_end, options.compression)?;
+        let entry_len = entry.bytes_in_pack();
+        entry.header.write_to(entry.decompressed_size, &mut *writer)?;
+        writer.write_all(
+            entry
+                .compressed
+                .as_deref()
+                .ok_or_else(|| io::Error::other("constructed base entry has no compressed data"))?,
+        )?;
+        prepared.items.push(crate::cache::delta::tree::Item::detached(
+            prepared.entries_end,
+            crate::index::write::TreeEntry {
+                id: object_id,
+                crc32: entry
+                    .crc32
+                    .ok_or_else(|| io::Error::other("constructed base entry has no CRC32"))?,
+            },
+        ));
+        prepared.entries_end = prepared
+            .entries_end
+            .checked_add(entry_len)
+            .ok_or_else(|| io::Error::other("pack length overflowed"))?;
+    }
+    prepared.num_objects = final_count_u32;
+
+    writer.flush()?;
+    let file = writer.get_mut();
+    file.rewind()?;
+    file.write_all(&data::header::encode(pack_version, final_count_u32))?;
+    file.flush()?;
+    file.rewind()?;
+    let pack_hash = gix_hash::bytes(
+        file,
+        prepared.entries_end,
+        options.object_hash,
+        &mut progress::Discard,
+        should_interrupt,
+    )
+    .map_err(crate::index::write::Error::Io)?;
+    file.write_all(pack_hash.as_slice())?;
+    file.flush()?;
+    prepared.pack_hash = Some(pack_hash);
+    Ok(pack_hash)
 }
 
 impl From<ProgressId> for gix_features::progress::Id {
@@ -85,60 +299,21 @@ impl crate::Bundle {
                 None => gix_tempfile::new(std::env::temp_dir(), ContainingDirectory::Exists, AutoRemove::Tempfile)?,
             }),
         )));
-        let (pack_entries_iter, pack_version): (
-            Box<dyn Iterator<Item = Result<data::input::Entry, data::input::Error>>>,
-            _,
-        ) = match thin_pack_base_object_lookup {
-            Some(thin_pack_lookup) => {
-                let pack = interrupt::Read {
-                    inner: pack,
-                    should_interrupt,
-                };
-                let buffered_pack = io::BufReader::new(pack);
-                let pack_entries_iter = data::input::LookupRefDeltaObjectsIter::new(
-                    data::input::BytesToEntriesIter::new_from_header(
-                        buffered_pack,
-                        options.iteration_mode,
-                        data::input::EntryDataMode::KeepAndCrc32,
-                        object_hash,
-                    )?,
-                    thin_pack_lookup,
-                    options.compression,
-                );
-                let pack_version = pack_entries_iter.inner.version();
-                let pack_entries_iter = data::input::EntriesToBytesIter::new(
-                    pack_entries_iter,
-                    LockWriter {
-                        writer: data_file.clone(),
-                    },
-                    pack_version,
-                    object_hash,
-                );
-                (Box::new(pack_entries_iter), pack_version)
-            }
-            None => {
-                let pack = PassThrough {
-                    reader: interrupt::Read {
-                        inner: pack,
-                        should_interrupt,
-                    },
-                    writer: Some(data_file.clone()),
-                };
-                // This buf-reader is required to assure we call 'read()' in order to fill the (extra) buffer. Otherwise all the counting
-                // we do with the wrapped pack reader doesn't work as it does not expect anyone to call BufRead functions directly.
-                // However, this is exactly what's happening in the ZipReader implementation that is eventually used.
-                // The performance impact of this is probably negligible, compared to all the other work that is done anyway :D.
-                let buffered_pack = io::BufReader::new(pack);
-                let pack_entries_iter = data::input::BytesToEntriesIter::new_from_header(
-                    buffered_pack,
-                    options.iteration_mode,
-                    data::input::EntryDataMode::Crc32,
-                    object_hash,
-                )?;
-                let pack_version = pack_entries_iter.version();
-                (Box::new(pack_entries_iter), pack_version)
-            }
+        let pack = PassThrough {
+            reader: interrupt::Read {
+                inner: pack,
+                should_interrupt,
+            },
+            writer: Some(data_file.clone()),
         };
+        let buffered_pack = io::BufReader::new(pack);
+        let pack_entries_iter = data::input::BytesToEntriesIter::new_from_header(
+            buffered_pack,
+            options.iteration_mode,
+            data::input::EntryDataMode::Crc32,
+            object_hash,
+        )?;
+        let pack_version = pack_entries_iter.version();
         let WriteOutcome {
             outcome,
             data_path,
@@ -149,9 +324,10 @@ impl crate::Bundle {
             progress,
             options,
             data_file,
-            pack_entries_iter,
+            Box::new(pack_entries_iter),
             should_interrupt,
             pack_version,
+            thin_pack_base_object_lookup,
         )?;
 
         Ok(Outcome {
@@ -196,48 +372,21 @@ impl crate::Bundle {
         ))));
         let object_hash = options.object_hash;
         let eight_pages = 4096 * 8;
-        let (pack_entries_iter, pack_version): (
-            Box<dyn Iterator<Item = Result<data::input::Entry, data::input::Error>> + Send + 'static>,
-            _,
-        ) = match thin_pack_base_object_lookup {
-            Some(thin_pack_lookup) => {
-                let pack = interrupt::Read {
-                    inner: pack,
-                    should_interrupt,
-                };
-                let buffered_pack = io::BufReader::with_capacity(eight_pages, pack);
-                let pack_entries_iter = data::input::LookupRefDeltaObjectsIter::new(
-                    data::input::BytesToEntriesIter::new_from_header(
-                        buffered_pack,
-                        options.iteration_mode,
-                        data::input::EntryDataMode::KeepAndCrc32,
-                        object_hash,
-                    )?,
-                    thin_pack_lookup,
-                    options.compression,
-                );
-                let pack_kind = pack_entries_iter.inner.version();
-                (Box::new(pack_entries_iter), pack_kind)
-            }
-            None => {
-                let pack = PassThrough {
-                    reader: interrupt::Read {
-                        inner: pack,
-                        should_interrupt,
-                    },
-                    writer: Some(data_file.clone()),
-                };
-                let buffered_pack = io::BufReader::with_capacity(eight_pages, pack);
-                let pack_entries_iter = data::input::BytesToEntriesIter::new_from_header(
-                    buffered_pack,
-                    options.iteration_mode,
-                    data::input::EntryDataMode::Crc32,
-                    object_hash,
-                )?;
-                let pack_kind = pack_entries_iter.version();
-                (Box::new(pack_entries_iter), pack_kind)
-            }
+        let pack = PassThrough {
+            reader: interrupt::Read {
+                inner: pack,
+                should_interrupt,
+            },
+            writer: Some(data_file.clone()),
         };
+        let buffered_pack = io::BufReader::with_capacity(eight_pages, pack);
+        let pack_entries_iter = data::input::BytesToEntriesIter::new_from_header(
+            buffered_pack,
+            options.iteration_mode,
+            data::input::EntryDataMode::Crc32,
+            object_hash,
+        )?;
+        let pack_version = pack_entries_iter.version();
         let num_objects = pack_entries_iter.size_hint().0;
         let pack_entries_iter =
             gix_features::parallel::EagerIterIf::new(move || num_objects > 25_000, pack_entries_iter, 5_000, 5);
@@ -255,6 +404,7 @@ impl crate::Bundle {
             Box::new(pack_entries_iter),
             should_interrupt,
             pack_version,
+            thin_pack_base_object_lookup,
         )?;
 
         Ok(Outcome {
@@ -267,22 +417,20 @@ impl crate::Bundle {
         })
     }
 
-    fn inner_write<'a>(
+    #[expect(clippy::too_many_arguments)]
+    fn inner_write<'a, Find>(
         directory: Option<impl AsRef<Path>>,
         progress: &mut dyn DynNestedProgress,
-        Options {
-            thread_limit,
-            iteration_mode: _,
-            index_version: index_kind,
-            object_hash,
-            alloc_limit_bytes,
-            compression: _,
-        }: Options,
+        options: Options,
         data_file: SharedTempFile,
         mut pack_entries_iter: Box<dyn Iterator<Item = Result<data::input::Entry, data::input::Error>> + 'a>,
         should_interrupt: &AtomicBool,
         pack_version: data::Version,
-    ) -> Result<WriteOutcome, Error> {
+        thin_pack_base_object_lookup: Option<Find>,
+    ) -> Result<WriteOutcome, Error>
+    where
+        Find: gix_object::Find,
+    {
         let mut indexing_progress = progress.add_child_with_id(
             "create index file".into(),
             ProgressId::IndexingSteps(Default::default()).into(),
@@ -292,20 +440,15 @@ impl crate::Bundle {
                 let directory = directory.as_ref();
                 let mut index_file = gix_tempfile::new(directory, ContainingDirectory::Exists, AutoRemove::Tempfile)?;
 
-                let outcome = crate::index::write_data_iter_to_stream(
-                    index_kind,
-                    {
-                        let data_file = Arc::clone(&data_file);
-                        move || new_pack_file_resolver(data_file)
-                    },
+                let outcome = prepare_complete_and_write(
+                    options,
+                    Arc::clone(&data_file),
                     &mut pack_entries_iter,
-                    thread_limit,
                     &mut indexing_progress,
                     &mut index_file,
                     should_interrupt,
-                    object_hash,
-                    alloc_limit_bytes,
                     pack_version,
+                    thin_pack_base_object_lookup.as_ref(),
                 )?;
                 drop(pack_entries_iter);
 
@@ -352,17 +495,15 @@ impl crate::Bundle {
                 }
             }
             None => WriteOutcome {
-                outcome: crate::index::write_data_iter_to_stream(
-                    index_kind,
-                    move || new_pack_file_resolver(data_file),
+                outcome: prepare_complete_and_write(
+                    options,
+                    data_file,
                     &mut pack_entries_iter,
-                    thread_limit,
                     &mut indexing_progress,
                     &mut io::sink(),
                     should_interrupt,
-                    object_hash,
-                    alloc_limit_bytes,
                     pack_version,
+                    thin_pack_base_object_lookup.as_ref(),
                 )?,
                 data_path: None,
                 index_path: None,

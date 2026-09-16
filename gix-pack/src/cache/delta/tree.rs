@@ -28,6 +28,15 @@ pub struct Item<T> {
 }
 
 impl<T> Item<T> {
+    pub(crate) fn detached(offset: crate::data::Offset, data: T) -> Self {
+        Item {
+            offset,
+            next_offset: 0,
+            data,
+            children: Vec::new(),
+        }
+    }
+
     /// Get the children
     // (we don't want to expose mutable access)
     pub(super) fn children(&self) -> &[u32] {

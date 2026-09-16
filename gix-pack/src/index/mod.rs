@@ -149,3 +149,5 @@ pub mod verify;
 pub mod write;
 #[cfg(feature = "streaming-input")]
 pub use write::function::write_data_iter_to_stream;
+#[cfg(feature = "streaming-input")]
+pub(crate) use write::function::{Prepared, prepare_data_iter};
