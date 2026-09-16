@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 
 use super::{Error, Tree, traverse};
-use crate::exact_vec;
 
 /// Maps each referenced base object ID to indices in `Tree::child_items` of ref-deltas waiting for it.
 pub(super) type RefDeltaChildren = BTreeMap<gix_hash::ObjectId, Vec<u32>>;
@@ -49,13 +48,43 @@ pub(super) enum NodeKind {
 impl<T> Tree<T> {
     /// Instantiate a empty tree capable of storing `num_objects` amounts of items.
     pub(crate) fn with_capacity(num_objects: usize) -> Result<Self, Error> {
+        #[cfg(target_os = "motor")]
+        let max_entries = Some(65_536);
+        #[cfg(not(target_os = "motor"))]
+        let max_entries = None;
+        Self::with_capacity_and_limit(num_objects, max_entries)
+    }
+
+    fn with_capacity_and_limit(num_objects: usize, max_entries: Option<usize>) -> Result<Self, Error> {
+        let capacity = max_entries.map_or(num_objects, |limit| num_objects.min(limit));
+        let mut root_items = Vec::new();
+        root_items.try_reserve_exact(capacity / 2).map_err(Error::OutOfMemory)?;
+        let mut child_items = Vec::new();
+        child_items
+            .try_reserve_exact(capacity / 2)
+            .map_err(Error::OutOfMemory)?;
         Ok(Tree {
-            root_items: exact_vec(num_objects / 2),
-            child_items: exact_vec(num_objects / 2),
+            root_items,
+            child_items,
             last_seen: None,
             future_child_offsets: Vec::new(),
             ref_child_indices: BTreeMap::new(),
+            max_entries,
         })
+    }
+
+    fn prepare_add(&mut self, kind: NodeKind) -> Result<(), Error> {
+        if let Some(max_entries) = self.max_entries {
+            if self.num_items() >= max_entries {
+                return Err(Error::EntryCountLimit { max_entries });
+            }
+        }
+        match kind {
+            NodeKind::Root => &mut self.root_items,
+            NodeKind::Child => &mut self.child_items,
+        }
+        .try_reserve(1)
+        .map_err(Error::OutOfMemory)
     }
 
     pub(super) fn num_items(&self) -> usize {
@@ -121,6 +150,7 @@ impl<T> Tree<T> {
     /// Add a new root node, one that only has children but is not a child itself, at the given pack `offset` and associate
     /// custom `data` with it.
     pub(crate) fn add_root(&mut self, offset: crate::data::Offset, data: T) -> Result<(), Error> {
+        self.prepare_add(NodeKind::Root)?;
         self.assert_is_incrementing_and_update_next_offset(offset)?;
         self.last_seen = NodeKind::Root.into();
         self.root_items.push(Item {
@@ -140,6 +170,7 @@ impl<T> Tree<T> {
         offset: crate::data::Offset,
         data: T,
     ) -> Result<(), Error> {
+        self.prepare_add(NodeKind::Child)?;
         self.assert_is_incrementing_and_update_next_offset(offset)?;
 
         let next_child_index = self.child_items.len();
@@ -183,6 +214,7 @@ impl<T> Tree<T> {
         offset: crate::data::Offset,
         data: T,
     ) -> Result<(), Error> {
+        self.prepare_add(NodeKind::Child)?;
         self.assert_is_incrementing_and_update_next_offset(offset)?;
 
         let child_index = self.child_items.len() as u32;
@@ -200,6 +232,33 @@ impl<T> Tree<T> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "streaming-input")]
+    #[test]
+    fn item_limit_clamps_estimated_capacity_and_guards_all_insertions() {
+        let mut tree = super::Tree::with_capacity_and_limit(usize::MAX, Some(3))
+            .expect("the estimate is clamped to the small item limit");
+        tree.add_root(1, ()).expect("root is within the limit");
+        tree.add_child(1, 2, ()).expect("OFS delta is within the limit");
+        tree.add_child_by_id(gix_hash::ObjectId::null(gix_hash::Kind::Sha1), 3, ())
+            .expect("REF delta is within the limit");
+
+        let error = tree.add_root(4, ()).expect_err("another root exceeds the limit");
+        assert!(matches!(error, super::Error::EntryCountLimit { max_entries: 3 }));
+        assert_eq!(tree.num_items(), 3);
+
+        let error = tree
+            .add_child(1, 4, ())
+            .expect_err("another OFS delta exceeds the limit");
+        assert!(matches!(error, super::Error::EntryCountLimit { max_entries: 3 }));
+        assert_eq!(tree.num_items(), 3);
+
+        let error = tree
+            .add_child_by_id(gix_hash::ObjectId::null(gix_hash::Kind::Sha1), 4, ())
+            .expect_err("another REF delta exceeds the limit");
+        assert!(matches!(error, super::Error::EntryCountLimit { max_entries: 3 }));
+        assert_eq!(tree.num_items(), 3);
+    }
+
     mod from_offsets_in_pack {
         use std::sync::atomic::AtomicBool;
 

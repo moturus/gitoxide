@@ -11,6 +11,10 @@ pub enum Error {
         /// The invariant violating offset
         pack_offset: crate::data::Offset,
     },
+    #[error("Pack delta tree entry count exceeds the limit of {max_entries}")]
+    EntryCountLimit { max_entries: usize },
+    #[error("Failed to reserve memory for pack delta tree entries")]
+    OutOfMemory(#[source] std::collections::TryReserveError),
 }
 ///
 /// A tree that allows one-time iteration over all nodes and their children, consuming it in the process,
@@ -35,6 +39,8 @@ pub struct Tree<T> {
     future_child_offsets: Vec<(crate::data::Offset, usize)>,
     /// Child indices waiting for an in-pack object with the given id to be resolved.
     ref_child_indices: tree::RefDeltaChildren,
+    /// The maximum number of actual entries accepted, if bounded on this target.
+    max_entries: Option<usize>,
 }
 
 ///
