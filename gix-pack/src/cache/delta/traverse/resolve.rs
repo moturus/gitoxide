@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use gix_features::{
     progress::Progress,
@@ -121,6 +121,49 @@ struct WorkItem<'a, T: Send> {
     parent: Option<SharedResolvedBase>,
 }
 
+/// Conservatively charges each new requested capacity; reuse is free and charges are never refunded.
+struct AllocationBudget {
+    remaining: Option<AtomicUsize>,
+    alloc_limit_bytes: Option<usize>,
+}
+
+impl AllocationBudget {
+    fn for_target(alloc_limit_bytes: Option<usize>) -> Self {
+        #[cfg(target_os = "motor")]
+        let remaining = Some(512 * 1024 * 1024);
+        #[cfg(not(target_os = "motor"))]
+        let remaining = None;
+        Self::new(remaining, alloc_limit_bytes)
+    }
+
+    fn new(remaining: Option<usize>, alloc_limit_bytes: Option<usize>) -> Self {
+        Self {
+            remaining: remaining.map(AtomicUsize::new),
+            alloc_limit_bytes,
+        }
+    }
+
+    fn reserve(&self, out: &mut Vec<u8>, len: usize) -> Result<(), Error> {
+        if len <= out.capacity() {
+            return Ok(());
+        }
+        let additional = len.saturating_sub(out.len());
+        let Some(remaining) = self.remaining.as_ref() else {
+            return out.try_reserve(additional).map_err(Into::into);
+        };
+
+        let mut current = remaining.load(Ordering::Relaxed);
+        loop {
+            let next = current.checked_sub(len).ok_or(Error::AggregateAllocationLimit)?;
+            match remaining.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed) {
+                Ok(_) => break,
+                Err(actual) => current = actual,
+            }
+        }
+        out.try_reserve_exact(additional).map_err(Into::into)
+    }
+}
+
 /// Resolve all delta trees from a shared, lock-free work-stealing pool.
 /// It's `unsafe` as there is safety-constraints on `items` and `child_items`.
 ///
@@ -150,6 +193,7 @@ where
     MBFN: FnMut(&mut T, &dyn Progress, Context<'_>) -> Result<(), E> + Send + Clone,
     E: std::error::Error + Send + Sync + 'static,
 {
+    let allocation_budget = AllocationBudget::for_target(alloc_limit_bytes);
     let work = items
         .iter_mut()
         .map(|item| {
@@ -177,7 +221,7 @@ where
             modify_base,
             ref_delta_children,
             object_hash,
-            alloc_limit_bytes,
+            &allocation_budget,
             should_interrupt,
         )
     }
@@ -195,7 +239,7 @@ where
             modify_base,
             ref_delta_children,
             object_hash,
-            alloc_limit_bytes,
+            &allocation_budget,
             should_interrupt,
         )
     }
@@ -219,7 +263,7 @@ fn resolve_serial<T, F, MBFN, E, R>(
     mut modify_base: MBFN,
     ref_delta_children: Option<super::SharedRefDeltaChildren>,
     object_hash: gix_hash::Kind,
-    alloc_limit_bytes: Option<usize>,
+    allocation_budget: &AllocationBudget,
     should_interrupt: &AtomicBool,
 ) -> Result<(), Error>
 where
@@ -247,7 +291,7 @@ where
             &mut modify_base,
             ref_delta_children.as_ref(),
             object_hash,
-            alloc_limit_bytes,
+            allocation_budget,
             &objects,
             &size,
             |child| work.push(child),
@@ -277,7 +321,7 @@ fn resolve_parallel<T, F, MBFN, E, R>(
     modify_base: MBFN,
     ref_delta_children: Option<super::SharedRefDeltaChildren>,
     object_hash: gix_hash::Kind,
-    alloc_limit_bytes: Option<usize>,
+    allocation_budget: &AllocationBudget,
     should_interrupt: &AtomicBool,
 ) -> Result<(), Error>
 where
@@ -287,8 +331,6 @@ where
     MBFN: FnMut(&mut T, &dyn Progress, Context<'_>) -> Result<(), E> + Send + Clone,
     E: std::error::Error + Send + Sync + 'static,
 {
-    use std::sync::atomic::AtomicUsize;
-
     if num_threads == 0 {
         return Ok(());
     }
@@ -349,7 +391,7 @@ where
                                     &mut modify_base,
                                     ref_delta_children.as_ref(),
                                     object_hash,
-                                    alloc_limit_bytes,
+                                    allocation_budget,
                                     objects,
                                     size,
                                     |child| {
@@ -457,7 +499,7 @@ fn resolve_task<'a, T, F, MBFN, E, R>(
     modify_base: &mut MBFN,
     ref_delta_children: Option<&super::SharedRefDeltaChildren>,
     object_hash: gix_hash::Kind,
-    alloc_limit_bytes: Option<usize>,
+    allocation_budget: &AllocationBudget,
     objects: &gix_features::progress::StepShared,
     size: &gix_features::progress::StepShared,
     mut push: impl FnMut(WorkItem<'a, T>),
@@ -481,10 +523,10 @@ where
             resolve,
             resolve_data,
             object_hash,
-            alloc_limit_bytes,
+            allocation_budget,
         )?;
         let (base_size, consumed) = data::delta::decode_header_size(delta_bytes)?;
-        let base_size = decoded_size_limited(base_size, alloc_limit_bytes)?;
+        let base_size = decoded_size_limited(base_size, allocation_budget)?;
         if parent.bytes.len() != base_size {
             return Err(data::delta::apply::Error::Corrupt {
                 message: "delta base size does not match base object size",
@@ -492,8 +534,8 @@ where
             .into());
         }
         let (result_size, result_header_size) = data::delta::decode_header_size(&delta_bytes[consumed..])?;
-        let result_size = decoded_size_limited(result_size, alloc_limit_bytes)?;
-        resize_with_limit(fully_resolved_delta_bytes, result_size, alloc_limit_bytes)?;
+        let result_size = decoded_size_limited(result_size, allocation_budget)?;
+        resize_with_limit(fully_resolved_delta_bytes, result_size, allocation_budget)?;
         data::delta::apply(
             &parent.bytes,
             fully_resolved_delta_bytes,
@@ -509,7 +551,7 @@ where
             resolve,
             resolve_data,
             object_hash,
-            alloc_limit_bytes,
+            allocation_budget,
         )?
     };
 
@@ -612,7 +654,7 @@ fn decompress_from_resolver<F, R>(
     resolve: &F,
     resolve_data: &R,
     object_hash: gix_hash::Kind,
-    alloc_limit_bytes: Option<usize>,
+    allocation_budget: &AllocationBudget,
 ) -> Result<(data::Entry, u64), Error>
 where
     F: for<'r> Fn(EntryRange, &'r R) -> Option<&'r [u8]> + Send,
@@ -622,8 +664,8 @@ where
     })?;
     let entry = data::Entry::from_bytes(bytes, slice.start, object_hash)?;
     let compressed = &bytes[entry.header_size()..];
-    let decompressed_len = decoded_size_limited(entry.decompressed_size, alloc_limit_bytes)?;
-    decompress_all_at_once_with(inflate, compressed, decompressed_len, out, alloc_limit_bytes)?;
+    let decompressed_len = decoded_size_limited(entry.decompressed_size, allocation_budget)?;
+    decompress_all_at_once_with(inflate, compressed, decompressed_len, out, allocation_budget)?;
     Ok((entry, slice.end))
 }
 
@@ -632,9 +674,9 @@ fn decompress_all_at_once_with(
     b: &[u8],
     decompressed_len: usize,
     out: &mut Vec<u8>,
-    alloc_limit_bytes: Option<usize>,
+    allocation_budget: &AllocationBudget,
 ) -> Result<(), Error> {
-    resize_with_limit(out, decompressed_len, alloc_limit_bytes)?;
+    resize_with_limit(out, decompressed_len, allocation_budget)?;
     inflate.reset();
     inflate.once(b, out).map_err(|err| Error::ZlibInflate {
         source: err,
@@ -643,19 +685,19 @@ fn decompress_all_at_once_with(
     Ok(())
 }
 
-fn decoded_size_limited(size: u64, alloc_limit_bytes: Option<usize>) -> Result<usize, Error> {
+fn decoded_size_limited(size: u64, allocation_budget: &AllocationBudget) -> Result<usize, Error> {
     let size: usize = size.try_into().map_err(|_| Error::OutOfMemory)?;
-    if alloc_limit_bytes.is_some_and(|limit| size > limit) {
+    if allocation_budget.alloc_limit_bytes.is_some_and(|limit| size > limit) {
         return Err(Error::OutOfMemory);
     }
     Ok(size)
 }
 
-fn resize_with_limit(out: &mut Vec<u8>, len: usize, alloc_limit_bytes: Option<usize>) -> Result<(), Error> {
-    if alloc_limit_bytes.is_some_and(|limit| len > limit) {
+fn resize_with_limit(out: &mut Vec<u8>, len: usize, allocation_budget: &AllocationBudget) -> Result<(), Error> {
+    if allocation_budget.alloc_limit_bytes.is_some_and(|limit| len > limit) {
         return Err(Error::OutOfMemory);
     }
-    out.try_reserve(len.saturating_sub(out.len()))?;
+    allocation_budget.reserve(out, len)?;
     out.resize(len, 0);
     Ok(())
 }
@@ -674,6 +716,28 @@ mod tests {
         cache::delta::{Tree, traverse},
         data,
     };
+
+    #[test]
+    fn cumulative_capacity_budget_charges_growth_without_refunds() {
+        let budget = super::AllocationBudget::new(Some(6), None);
+        let mut first = Vec::new();
+        super::resize_with_limit(&mut first, 3, &budget).expect("first capacity fits");
+        first.clear();
+        super::resize_with_limit(&mut first, 3, &budget).expect("reused capacity is free");
+
+        let mut second = Vec::new();
+        super::resize_with_limit(&mut second, 3, &budget).expect("exact allowance fits");
+        drop((first, second));
+
+        let mut rejected = vec![1];
+        let old_capacity = rejected.capacity();
+        let requested = old_capacity.checked_add(1).expect("test capacity fits in memory");
+        let error = super::resize_with_limit(&mut rejected, requested, &budget)
+            .expect_err("dropping charged buffers does not refund the allowance");
+        assert!(matches!(error, traverse::Error::AggregateAllocationLimit));
+        assert_eq!(rejected, [1], "rejection happens before content mutation");
+        assert_eq!(rejected.capacity(), old_capacity, "rejection happens before allocation");
+    }
 
     #[test]
     fn traversal_resolves_children_lazily() {

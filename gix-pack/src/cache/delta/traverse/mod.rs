@@ -36,6 +36,8 @@ pub enum Error {
     Interrupted,
     #[error("Entry too large to fit in memory")]
     OutOfMemory,
+    #[error("Delta traversal exceeds the cumulative allocation allowance")]
+    AggregateAllocationLimit,
     #[error(
         "The base at {base_pack_offset} was referred to by a ref-delta, but it was never added to the tree as if the pack was still thin."
     )]
