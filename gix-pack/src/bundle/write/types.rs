@@ -74,7 +74,8 @@ impl Outcome {
     }
 }
 
-pub(crate) type SharedTempFile = Arc<parking_lot::Mutex<std::io::BufWriter<gix_tempfile::Handle<Writable>>>>;
+pub(crate) type SharedTempFile =
+    Arc<parking_lot::Mutex<std::io::BufWriter<super::limited_file::LimitedFile<gix_tempfile::Handle<Writable>>>>>;
 
 pub(crate) struct PassThrough<R> {
     pub reader: R,

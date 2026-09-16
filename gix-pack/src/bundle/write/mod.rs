@@ -15,6 +15,8 @@ mod error;
 pub use error::Error;
 use gix_features::progress::prodash::DynNestedProgress;
 
+mod limited_file;
+use limited_file::LimitedFile;
 mod types;
 use types::{LockWriter, PassThrough};
 pub use types::{Options, Outcome};
@@ -78,10 +80,10 @@ impl crate::Bundle {
         let object_hash = options.object_hash;
         let data_file = Arc::new(parking_lot::Mutex::new(io::BufWriter::with_capacity(
             64 * 1024,
-            match directory.as_ref() {
+            LimitedFile::for_target(match directory.as_ref() {
                 Some(directory) => gix_tempfile::new(directory, ContainingDirectory::Exists, AutoRemove::Tempfile)?,
                 None => gix_tempfile::new(std::env::temp_dir(), ContainingDirectory::Exists, AutoRemove::Tempfile)?,
-            },
+            }),
         )));
         let (pack_entries_iter, pack_version): (
             Box<dyn Iterator<Item = Result<data::input::Entry, data::input::Error>>>,
@@ -186,10 +188,12 @@ impl crate::Bundle {
             progress: progress::ThroughputOnDrop::new(read_progress),
         };
 
-        let data_file = Arc::new(parking_lot::Mutex::new(io::BufWriter::new(match directory.as_ref() {
-            Some(directory) => gix_tempfile::new(directory, ContainingDirectory::Exists, AutoRemove::Tempfile)?,
-            None => gix_tempfile::new(std::env::temp_dir(), ContainingDirectory::Exists, AutoRemove::Tempfile)?,
-        })));
+        let data_file = Arc::new(parking_lot::Mutex::new(io::BufWriter::new(LimitedFile::for_target(
+            match directory.as_ref() {
+                Some(directory) => gix_tempfile::new(directory, ContainingDirectory::Exists, AutoRemove::Tempfile)?,
+                None => gix_tempfile::new(std::env::temp_dir(), ContainingDirectory::Exists, AutoRemove::Tempfile)?,
+            },
+        ))));
         let object_hash = options.object_hash;
         let eight_pages = 4096 * 8;
         let (pack_entries_iter, pack_version): (
@@ -328,6 +332,7 @@ impl crate::Bundle {
                             .into_inner()
                             .into_inner()
                             .map_err(|err| Error::from(err.into_error()))?
+                            .into_inner()
                             .persist(&data_path)?;
                         Some(keep_path)
                     };
@@ -380,7 +385,7 @@ fn new_pack_file_resolver(
 )> {
     let mut guard = data_file.lock();
     guard.flush()?;
-    let mapped_file = crate::mmap::read_only(&guard.get_mut().with_mut(|f| f.path().to_owned())?)?;
+    let mapped_file = crate::mmap::read_only(&guard.get_mut().inner_mut().with_mut(|f| f.path().to_owned())?)?;
     Ok((resolve_entry, mapped_file))
 }
 
