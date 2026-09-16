@@ -123,13 +123,11 @@ where
             decompressor: &mut self.decompressor,
         };
 
-        let bytes_copied = io::copy(&mut decompressed_reader, &mut io::sink()).map_err(gix_hash::io::Error::from)?;
-        if bytes_copied != entry.decompressed_size {
-            return Err(input::Error::IncompletePack {
-                actual: bytes_copied,
-                expected: entry.decompressed_size,
-            });
-        }
+        #[cfg(target_os = "motor")]
+        let decoded_size_limit = Some(16 * 1024 * 1024);
+        #[cfg(not(target_os = "motor"))]
+        let decoded_size_limit = None;
+        let bytes_copied = copy_decompressed(&mut decompressed_reader, entry.decompressed_size, decoded_size_limit)?;
 
         let pack_offset = self.offset;
         let compressed_size = decompressed_reader.decompressor.total_in();
@@ -278,6 +276,35 @@ where
     }
 }
 
+fn copy_decompressed(read: &mut impl io::Read, expected: u64, limit: Option<u64>) -> Result<u64, input::Error> {
+    let actual = match limit {
+        Some(limit) => {
+            if expected > limit {
+                return Err(input::Error::Io(
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("pack entry declares {expected} decoded bytes, exceeding the {limit}-byte limit"),
+                    )
+                    .into(),
+                ));
+            }
+            let probe_limit = expected.checked_add(1).ok_or_else(|| {
+                input::Error::Io(
+                    io::Error::new(io::ErrorKind::InvalidData, "pack entry decoded size overflowed").into(),
+                )
+            })?;
+            let mut bounded = io::Read::take(&mut *read, probe_limit);
+            io::copy(&mut bounded, &mut io::sink())
+        }
+        None => io::copy(read, &mut io::sink()),
+    }
+    .map_err(gix_hash::io::Error::from)?;
+    if actual != expected {
+        return Err(input::Error::IncompletePack { actual, expected });
+    }
+    Ok(actual)
+}
+
 impl<T> crate::data::File<T>
 where
     T: crate::FileData,
@@ -332,5 +359,38 @@ where
 
     fn flush(&mut self) -> std::io::Result<()> {
         self.inner.flush()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+
+    #[test]
+    fn decoded_size_limit_checks_declaration_and_actual_output() {
+        let mut exact = io::Cursor::new(b"abc");
+        assert_eq!(
+            super::copy_decompressed(&mut exact, 3, Some(3)).expect("exact declared size fits"),
+            3
+        );
+
+        let mut over_limit = io::Cursor::new(b"unread");
+        let error = super::copy_decompressed(&mut over_limit, 4, Some(3))
+            .expect_err("an over-limit declaration is rejected before reading");
+        assert!(matches!(
+            error,
+            super::input::Error::Io(gix_hash::io::Error::Io(err))
+                if err.kind() == io::ErrorKind::InvalidData
+        ));
+        assert_eq!(over_limit.position(), 0, "declaration is checked before reading");
+
+        let mut oversized = io::Cursor::new(b"abcd-more-data");
+        let error = super::copy_decompressed(&mut oversized, 3, Some(3))
+            .expect_err("actual output is bounded one byte beyond its declaration");
+        assert!(matches!(
+            error,
+            super::input::Error::IncompletePack { actual: 4, expected: 3 }
+        ));
+        assert_eq!(oversized.position(), 4, "inflation stops after declared size plus one");
     }
 }
