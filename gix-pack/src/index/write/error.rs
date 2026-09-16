@@ -20,4 +20,10 @@ pub enum Error {
     Tree(#[from] crate::cache::delta::Error),
     #[error(transparent)]
     TreeTraversal(#[from] crate::cache::delta::traverse::Error),
+    #[error("Pack contains object {object_id} more than once")]
+    DuplicateObject { object_id: gix_hash::ObjectId },
+    #[error("The received object {object_id} has no real root in the completed pack")]
+    UnrootedDeltaChain { object_id: gix_hash::ObjectId },
+    #[error("Failed to reserve memory while validating thin-pack dependencies")]
+    OutOfMemory(#[from] std::collections::TryReserveError),
 }
