@@ -189,6 +189,34 @@ mod non_bare {
     }
 
     #[test]
+    fn init_refuses_an_existing_dot_git_file_without_changing_it() -> crate::Result {
+        let tmp = tempfile::tempdir()?;
+        let dot_git = tmp.path().join(".git");
+        std::fs::write(&dot_git, b"owned by the caller")?;
+
+        let err = gix::ThreadSafeRepository::init_opts(
+            tmp.path(),
+            gix::create::Kind::WithWorktree,
+            gix::create::Options {
+                destination_must_be_empty: Some(false),
+                ..Default::default()
+            },
+            gix::open::Options::isolated(),
+        )
+        .expect_err("an existing .git entry must not be reused");
+        assert!(matches!(
+            err,
+            gix::init::Error::Init(gix::create::Error::DirectoryExists { path }) if path == dot_git
+        ));
+        assert_eq!(
+            std::fs::read(dot_git)?,
+            b"owned by the caller",
+            "the rejected .git entry remains unchanged"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn init_into_non_empty_directory_is_not_allowed_if_option_is_true() -> crate::Result {
         let tmp = tempfile::tempdir()?;
         std::fs::write(tmp.path().join("existing.txt"), b"I was here before you")?;

@@ -110,6 +110,19 @@ fn create_dir(p: &Path) -> Result<(), Error> {
     })
 }
 
+fn create_dir_exclusive(p: &Path) -> Result<(), Error> {
+    fs::create_dir(p).map_err(|source| {
+        if source.kind() == std::io::ErrorKind::AlreadyExists {
+            Error::DirectoryExists { path: p.to_owned() }
+        } else {
+            Error::CreateDirectory {
+                source,
+                path: p.to_owned(),
+            }
+        }
+    })
+}
+
 /// Options for use in [`into()`];
 #[derive(Copy, Clone)]
 pub struct Options {
@@ -207,13 +220,12 @@ pub(crate) fn into_with_capabilities(
     }
 
     if !bare {
+        create_dir(&dot_git)?;
         dot_git.push(DOT_GIT_DIR);
-
-        if dot_git.is_dir() {
-            return Err(Error::DirectoryExists { path: dot_git });
-        }
+        create_dir_exclusive(&dot_git)?;
+    } else {
+        create_dir(&dot_git)?;
     }
-    create_dir(&dot_git)?;
 
     {
         let mut cursor = NewDir(&mut dot_git).at("info")?;
