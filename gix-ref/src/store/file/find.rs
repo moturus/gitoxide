@@ -1,6 +1,6 @@
 use std::{
     borrow::Cow,
-    io::{self, Read},
+    io,
     path::{Path, PathBuf},
 };
 
@@ -303,9 +303,9 @@ impl file::Store {
         let (base, relative_path) = self.reference_path_with_base(name);
         let ref_path = base.join(&relative_path);
         match std::fs::File::open(&ref_path) {
-            Ok(mut file) => {
+            Ok(file) => {
                 let mut buf = Vec::with_capacity(128);
-                if let Err(err) = file.read_to_end(&mut buf) {
+                if let Err(err) = loose::read_file(&file, &mut buf) {
                     return if ref_path.is_dir() { Ok(None) } else { Err(err) };
                 }
                 Ok(buf.into())

@@ -3,7 +3,6 @@ use gix_path::RelativePath;
 use std::{
     borrow::Cow,
     cmp::Ordering,
-    io::Read,
     iter::Peekable,
     path::{Path, PathBuf},
 };
@@ -89,10 +88,7 @@ impl<'p> LooseThenPacked<'p, '_> {
         let common_dir = self.common_dir;
         let (refpath, name) = res.map_err(Error::Traversal)?;
         std::fs::File::open(&refpath)
-            .and_then(|mut f| {
-                buf.clear();
-                f.read_to_end(buf)
-            })
+            .and_then(|file| loose::read_file(&file, buf))
             .map_err(|err| Error::ReadFileContents {
                 source: err,
                 path: refpath.to_owned(),

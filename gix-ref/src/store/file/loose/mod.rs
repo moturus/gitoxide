@@ -1,5 +1,25 @@
 use crate::{FullName, Kind, Target};
 
+#[cfg(target_os = "motor")]
+const MAX_LOOSE_REF_BYTES: usize = 8 * 1024 * 1024;
+
+/// Read a caller-opened loose reference, positioned at the beginning, into `out`.
+/// On Motor, require a regular file no larger than 8 MiB and reject concurrent growth.
+pub(crate) fn read_file(file: &std::fs::File, out: &mut Vec<u8>) -> std::io::Result<()> {
+    out.clear();
+    #[cfg(target_os = "motor")]
+    {
+        *out = gix_features::fs::read_to_end_bounded(file, MAX_LOOSE_REF_BYTES)?;
+    }
+    #[cfg(not(target_os = "motor"))]
+    {
+        use std::io::Read;
+        let mut file = file;
+        file.read_to_end(out)?;
+    }
+    Ok(())
+}
+
 /// A git _ref_ which is stored in a file.
 #[derive(Debug, PartialOrd, PartialEq, Ord, Eq, Hash, Clone)]
 pub struct Reference {
