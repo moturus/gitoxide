@@ -59,16 +59,15 @@ impl File {
         let _span = gix_features::trace::detail!("gix_index::File::at()");
         let path = path.into();
         let (data, mtime) = {
-            #[cfg(target_os = "motor")]
-            let mut file = std::fs::File::open(&path)?;
-            #[cfg(not(target_os = "motor"))]
             let file = std::fs::File::open(&path)?;
             #[cfg(target_os = "motor")]
             let data = {
-                use std::io::Read;
-                let mut data = Vec::new();
-                file.read_to_end(&mut data)?;
-                data
+                const MAX_INDEX_BYTES: usize = 16 * 1024 * 1024;
+                let max_bytes = options
+                    .alloc_limit_bytes
+                    .unwrap_or(MAX_INDEX_BYTES)
+                    .min(MAX_INDEX_BYTES);
+                gix_features::fs::read_to_end_bounded(&file, max_bytes)?
             };
             #[cfg(not(target_os = "motor"))]
             // SAFETY: we have to take the risk of somebody changing the file underneath. Git never writes into the same file.

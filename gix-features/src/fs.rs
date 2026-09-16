@@ -255,6 +255,46 @@ pub mod walkdir {
 #[cfg(feature = "walkdir")]
 pub use self::walkdir::{WalkDir, walkdir_new, walkdir_sorted_new};
 
+/// Read a caller-opened regular file, positioned at the beginning, without exceeding `max_bytes`.
+///
+/// The file length is checked before allocation. A short read or growth after that check is an error.
+pub fn read_to_end_bounded(mut file: &std::fs::File, max_bytes: usize) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "bounded input is not a regular file",
+        ));
+    }
+    let len = usize::try_from(metadata.len()).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "bounded input length does not fit in memory",
+        )
+    })?;
+    if len > max_bytes {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "bounded input exceeds the byte limit",
+        ));
+    }
+
+    let mut data = Vec::new();
+    data.try_reserve_exact(len)
+        .map_err(|source| std::io::Error::new(std::io::ErrorKind::OutOfMemory, source))?;
+    data.resize(len, 0);
+    file.read_exact(&mut data)?;
+    if file.read(&mut [0])? != 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "bounded input grew while it was read",
+        ));
+    }
+    Ok(data)
+}
+
 /// Prepare open options which won't follow symlinks when the file is opened.
 ///
 /// Note: only effective on unix currently.

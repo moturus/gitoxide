@@ -85,8 +85,10 @@ pub mod open {
         ) -> Result<Self, Error> {
             #[cfg(target_os = "motor")]
             let backing = {
+                const MAX_PACKED_REFS_BYTES: usize = 16 * 1024 * 1024;
                 let _ = use_memory_map_if_larger_than_bytes;
-                packed::Backing::InMemory(std::fs::read(&path)?)
+                let file = std::fs::File::open(&path)?;
+                packed::Backing::InMemory(gix_features::fs::read_to_end_bounded(&file, MAX_PACKED_REFS_BYTES)?)
             };
             #[cfg(not(target_os = "motor"))]
             let backing = if std::fs::metadata(&path)?.len() <= use_memory_map_if_larger_than_bytes {
