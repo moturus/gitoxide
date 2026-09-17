@@ -26,10 +26,59 @@ impl Transaction<'_, '_> {
     ///
     /// Note that transactions will be prepared automatically as needed.
     pub fn commit<'a>(self, committer: impl Into<Option<gix_actor::SignatureRef<'a>>>) -> Result<Vec<RefEdit>, Error> {
-        self.commit_inner(committer.into())
+        self.commit_inner(committer.into(), None)
     }
 
-    fn commit_inner(self, committer: Option<gix_actor::SignatureRef<'_>>) -> Result<Vec<RefEdit>, Error> {
+    /// Commit one prepared symbolic-reference update without dereferencing, and write its reflog with the
+    /// given object IDs.
+    ///
+    /// The caller must supply the correct previous and new object IDs. This method checks their hash kinds,
+    /// but doesn't resolve symbolic targets or assert their object IDs. Null IDs represent unborn endpoints.
+    /// Existing store reflog policy still applies, and an explicit entry isn't suppressed when both IDs are
+    /// equal. Like [`commit()`][Transaction::commit()], publication may be partial on error.
+    pub fn commit_with_reflog_ids<'a>(
+        self,
+        committer: impl Into<Option<gix_actor::SignatureRef<'a>>>,
+        previous_oid: gix_hash::ObjectId,
+        new_oid: gix_hash::ObjectId,
+    ) -> Result<Vec<RefEdit>, Error> {
+        let updates = self.updates.as_ref().expect("BUG: must call prepare before commit");
+        let is_symbolic_update = if let [change] = updates.as_slice() {
+            change.parent_index.is_none()
+                && !change.update.deref
+                && matches!(
+                    &change.update.change,
+                    Change::Update {
+                        log: LogChange {
+                            mode: RefLog::AndReference,
+                            ..
+                        },
+                        new: Target::Symbolic(_),
+                        ..
+                    }
+                )
+        } else {
+            false
+        };
+        if !is_symbolic_update
+            || previous_oid.kind() != self.store.object_hash
+            || new_oid.kind() != self.store.object_hash
+        {
+            return Err(Error::PreprocessingFailed {
+                source: std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "explicit reflog IDs require one symbolic-reference update without dereferencing and matching hash kinds",
+                ),
+            });
+        }
+        self.commit_inner(committer.into(), Some((previous_oid, new_oid)))
+    }
+
+    fn commit_inner(
+        self,
+        committer: Option<gix_actor::SignatureRef<'_>>,
+        symbolic_reflog_ids: Option<(gix_hash::ObjectId, gix_hash::ObjectId)>,
+    ) -> Result<Vec<RefEdit>, Error> {
         let mut updates = self.updates.expect("BUG: must call prepare before commit");
         let delete_loose_refs = matches!(
             self.packed_refs,
@@ -50,14 +99,18 @@ impl Transaction<'_, '_> {
                     if update_reflog {
                         let log_update = match new {
                             Target::Symbolic(_) => {
-                                // Special HACK: no reflog for symref changes as there is no OID involved which the reflog needs.
-                                // Unless, the ref is new and we can obtain a peeled id
-                                // identified by the expectation of what could be there, as is the case when cloning.
-                                match expected {
-                                    PreviousValue::ExistingMustMatch(Target::Object(oid)) => {
-                                        Some((Some(gix_hash::ObjectId::null(oid.kind())), oid))
+                                if let Some((previous_oid, new_oid)) = symbolic_reflog_ids.as_ref() {
+                                    Some((Some(previous_oid.to_owned()), new_oid))
+                                } else {
+                                    // Special HACK: no reflog for symref changes as there is no OID involved which the reflog needs.
+                                    // Unless, the ref is new and we can obtain a peeled id
+                                    // identified by the expectation of what could be there, as is the case when cloning.
+                                    match expected {
+                                        PreviousValue::ExistingMustMatch(Target::Object(oid)) => {
+                                            Some((Some(gix_hash::ObjectId::null(oid.kind())), oid))
+                                        }
+                                        _ => None,
                                     }
-                                    _ => None,
                                 }
                             }
                             Target::Object(new_oid) => {
@@ -72,7 +125,7 @@ impl Transaction<'_, '_> {
                             }
                         };
                         if let Some((previous, new_oid)) = log_update {
-                            let do_update = previous.as_ref() != Some(new_oid);
+                            let do_update = symbolic_reflog_ids.is_some() || previous.as_ref() != Some(new_oid);
                             if do_update {
                                 self.store.reflog_create_or_append(
                                     change.update.name.as_ref(),

@@ -438,6 +438,164 @@ fn symbolic_reference_writes_reflog_if_previous_value_is_set() -> crate::Result 
 }
 
 #[test]
+fn symbolic_update_with_explicit_reflog_ids_is_checked_and_exact() -> crate::Result {
+    let (_keep, store) = empty_store()?;
+    let old_id = hex_to_id("28ce6a8b26aa170e1de65536fe8abe1832bd3242");
+    let new_id = hex_to_id("e69de29bb2d1d6434b8b29ae775ad8c2e48c5391");
+    let with_id = |name: &str, id: ObjectId| {
+        let mut edit = create_at(name);
+        let Change::Update { new, .. } = &mut edit.change else {
+            unreachable!("create_at() always returns an update");
+        };
+        *new = Target::Object(id);
+        edit
+    };
+    let update = |expected: &str, new: &str, message: &str| -> crate::Result<RefEdit> {
+        Ok(RefEdit {
+            change: Change::Update {
+                log: LogChange {
+                    mode: RefLog::AndReference,
+                    force_create_reflog: true,
+                    message: message.into(),
+                },
+                expected: PreviousValue::MustExistAndMatch(Target::Symbolic(expected.try_into()?)),
+                new: Target::Symbolic(new.try_into()?),
+            },
+            name: "HEAD".try_into()?,
+            deref: false,
+        })
+    };
+
+    store
+        .transaction()
+        .prepare(
+            [
+                with_id("refs/heads/main", old_id),
+                with_id("refs/heads/other", new_id),
+                with_id("refs/heads/same", new_id),
+                create_symbolic_at("HEAD", "refs/heads/main"),
+            ],
+            Fail::Immediately,
+            Fail::Immediately,
+        )?
+        .commit(committer().to_ref(&mut TimeBuf::default()))?;
+    assert!(
+        !store.reflog_exists("HEAD")?,
+        "ordinary symbolic commits retain their existing no-reflog behavior"
+    );
+    let branch_logs = [
+        reflog_lines(&store, "refs/heads/main")?,
+        reflog_lines(&store, "refs/heads/other")?,
+        reflog_lines(&store, "refs/heads/same")?,
+    ];
+    let assert_branches_unchanged = || -> crate::Result {
+        for ((name, id), expected_log) in [
+            ("refs/heads/main", old_id),
+            ("refs/heads/other", new_id),
+            ("refs/heads/same", new_id),
+        ]
+        .into_iter()
+        .zip(&branch_logs)
+        {
+            assert_eq!(
+                store.find_loose(name)?.target,
+                Target::Object(id),
+                "{name} must not move"
+            );
+            assert_eq!(
+                &reflog_lines(&store, name)?,
+                expected_log,
+                "{name} must not gain a reflog entry"
+            );
+        }
+        Ok(())
+    };
+
+    store
+        .transaction()
+        .prepare(
+            Some(update("refs/heads/main", "refs/heads/other", "switch changed")?),
+            Fail::Immediately,
+            Fail::Immediately,
+        )?
+        .commit_with_reflog_ids(committer().to_ref(&mut TimeBuf::default()), old_id, new_id)?;
+    assert_eq!(
+        store.find_loose("HEAD")?.target,
+        Target::Symbolic("refs/heads/other".try_into()?)
+    );
+    assert_eq!(
+        reflog_lines(&store, "HEAD")?,
+        vec![log_line(old_id, new_id, "switch changed")]
+    );
+    assert_branches_unchanged()?;
+
+    store
+        .transaction()
+        .prepare(
+            Some(update("refs/heads/other", "refs/heads/same", "switch equal")?),
+            Fail::Immediately,
+            Fail::Immediately,
+        )?
+        .commit_with_reflog_ids(committer().to_ref(&mut TimeBuf::default()), new_id, new_id)?;
+    let expected_lines = vec![
+        log_line(old_id, new_id, "switch changed"),
+        log_line(new_id, new_id, "switch equal"),
+    ];
+    assert_eq!(
+        reflog_lines(&store, "HEAD")?,
+        expected_lines,
+        "equal IDs still describe a branch-name switch"
+    );
+    assert_branches_unchanged()?;
+
+    let stale = store.transaction().prepare(
+        Some(update("refs/heads/other", "refs/heads/stale", "stale")?),
+        Fail::Immediately,
+        Fail::Immediately,
+    );
+    assert!(matches!(
+        stale,
+        Err(transaction::prepare::Error::ReferenceOutOfDate { .. })
+    ));
+    assert_eq!(
+        store.find_loose("HEAD")?.target,
+        Target::Symbolic("refs/heads/same".try_into()?)
+    );
+    assert_eq!(reflog_lines(&store, "HEAD")?, expected_lines);
+    assert_branches_unchanged()?;
+
+    let invalid = store
+        .transaction()
+        .prepare(
+            [
+                update("refs/heads/same", "refs/heads/invalid", "invalid")?,
+                create_symbolic_at("ORIG_HEAD", "refs/heads/main"),
+            ],
+            Fail::Immediately,
+            Fail::Immediately,
+        )?
+        .commit_with_reflog_ids(committer().to_ref(&mut TimeBuf::default()), new_id, old_id);
+    match invalid {
+        Err(transaction::commit::Error::PreprocessingFailed { source }) => {
+            assert_eq!(source.kind(), std::io::ErrorKind::InvalidInput);
+        }
+        other => panic!("unexpected result: {other:?}"),
+    }
+    assert_eq!(
+        store.find_loose("HEAD")?.target,
+        Target::Symbolic("refs/heads/same".try_into()?)
+    );
+    assert!(store.try_find_loose("ORIG_HEAD")?.is_none());
+    assert_eq!(
+        reflog_lines(&store, "HEAD")?,
+        expected_lines,
+        "misuse is rejected before any write"
+    );
+    assert_branches_unchanged()?;
+    Ok(())
+}
+
+#[test]
 fn windows_device_name_is_illegal_with_enabled_windows_protections() -> crate::Result {
     let (_keep, mut store) = empty_store()?;
     store.prohibit_windows_device_names = true;
