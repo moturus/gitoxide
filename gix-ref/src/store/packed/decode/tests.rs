@@ -302,7 +302,7 @@ mod header {
         let mut input: &[u8] = b"# pack-refs with: peeled\n";
         let header = decode::header(&mut input).unwrap();
 
-        assert!(input.is_empty());
+        assert_eq!(input, []);
         assert_eq!(
             header,
             Header {
@@ -318,7 +318,7 @@ mod header {
         let mut input: &[u8] = b"# pack-refs with: \n";
         let header = decode::header(&mut input).unwrap();
 
-        assert!(input.is_empty());
+        assert_eq!(input, []);
         assert_eq!(
             header,
             Header {
