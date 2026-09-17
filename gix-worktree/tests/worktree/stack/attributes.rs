@@ -137,3 +137,46 @@ mod baseline {
         }
     }
 }
+
+#[test]
+fn index_mappings_accept_all_regular_file_modes() {
+    use gix_index::entry::{Flags, Mode, Stat};
+
+    let object_hash = gix_testtools::object_hash();
+    let id = object_hash.empty_blob();
+    let mut index = gix_index::State::new(object_hash);
+    for (path, mode) in [
+        (".gitattributes", Mode::FILE),
+        (".gitignore", Mode::FILE_EXECUTABLE),
+        ("nested/.gitattributes", Mode::FILE_EXECUTABLE),
+        ("nested/.gitignore", Mode::FILE),
+        ("nested/unrelated", Mode::FILE_EXECUTABLE),
+    ] {
+        index.dangerously_push_entry(Stat::default(), id, Flags::empty(), mode, path.as_bytes().as_bstr());
+    }
+    index.sort_entries();
+
+    let parse_ignore = gix_ignore::search::Ignore::default();
+    let state = gix_worktree::stack::State::for_add(
+        Default::default(),
+        state::Ignore::new(
+            Default::default(),
+            Default::default(),
+            None,
+            state::ignore::Source::IdMapping,
+            parse_ignore,
+        ),
+    );
+    let mappings = state.id_mappings_from_index(&index, index.path_backing(), gix_glob::pattern::Case::Sensitive);
+
+    assert_eq!(
+        mappings,
+        vec![
+            (".gitattributes".into(), id),
+            (".gitignore".into(), id),
+            ("nested/.gitattributes".into(), id),
+            ("nested/.gitignore".into(), id),
+        ],
+        "attribute and ignore files are blobs regardless of executable mode"
+    );
+}
